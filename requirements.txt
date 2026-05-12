@@ -1,0 +1,5 @@
+torch>=2.0
+torchvision>=0.15
+numpy>=1.21
+Pillow>=9.0
+tomli>=2.0;python_version<"3.11"
