@@ -58,10 +58,54 @@ class PerceptualLoss(nn.Module):
         return F.l1_loss(pred_feat, target_feat)
 
 
+class DarkChannelLoss(nn.Module):
+    """
+    Physics-based Dark Channel Prior (DCP) loss.
+
+    Observation: in clear, outdoor, non-sky images, at least one RGB channel
+    in a local patch has very low intensity (close to zero). If the predicted
+    clean image has a bright dark channel, it still contains haze residue.
+
+    Loss = mean(dark_channel(predicted_clean_image))
+
+    This acts as a physics regularizer, encouraging the network to produce
+    outputs consistent with the DCP assumption.
+
+    Reference:
+        He, K., Sun, J., & Tang, X. (2010). Single Image Haze Removal Using
+        Dark Channel Prior. IEEE TPAMI, 33(12), 2341-2353.
+    """
+
+    def __init__(self, patch_size=15):
+        super().__init__()
+        self.patch_size = patch_size
+
+    def forward(self, pred, target=None):
+        """
+        Compute DCP loss on the predicted image.
+        The target argument is accepted but ignored (for API compatibility
+        with MixedLoss which passes both pred and target to all sub-losses).
+        """
+        # 1. Minimum across color channels
+        min_channels, _ = torch.min(pred, dim=1, keepdim=True)
+
+        # 2. Minimum across local spatial patch (using -MaxPool trick)
+        pad = self.patch_size // 2
+        dark_channel = -F.max_pool2d(
+            -min_channels,
+            kernel_size=self.patch_size,
+            stride=1,
+            padding=pad,
+        )
+
+        # Mean of dark channel — lower = cleaner image
+        return torch.mean(dark_channel)
+
+
 class MixedLoss(nn.Module):
     """
     Weighted combination of multiple loss functions.
-    Example: 1.0 * L1 + 0.2 * (1 - SSIM) + 0.1 * Perceptual
+    Example: 1.0 * L1 + 0.2 * (1 - SSIM) + 0.1 * Perceptual + 0.01 * DCP
     """
 
     def __init__(self, weights: dict):
@@ -77,6 +121,8 @@ class MixedLoss(nn.Module):
             self.losses["ssim"] = SSIMLoss()
         if "perceptual" in weights:
             self.losses["perceptual"] = PerceptualLoss()
+        if "dcp" in weights:
+            self.losses["dcp"] = DarkChannelLoss()
 
     def forward(self, pred, target):
         total = 0.0

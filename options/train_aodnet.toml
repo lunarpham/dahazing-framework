@@ -1,32 +1,31 @@
 # ── Experiment ───────────────────────────────────────────────────────────────
-name = "dehazenet_hybrid_reside_ots"
+name = "aodnet_reside_its"
 
 # ── Dataset ─────────────────────────────────────────────────────────────────
 [datasets.train]
-hazy_dir = 'E:\Documents\Computer Vision Learning\Dataset\ots\ots_hazy'
-clear_dir = 'E:\Documents\Computer Vision Learning\Dataset\ots\ots_clear'
+hazy_dir = 'E:\Documents\Computer Vision Learning\Dataset\hazy'
+clear_dir = 'E:\Documents\Computer Vision Learning\Dataset\clear'
 pairing_strategy = "reside"
 patch_size = 128
-batch_size = 8
+batch_size = 16       # AOD-Net is tiny, can use larger batches
 num_workers = 4
 augmentation = ["hflip", "vflip"]
 
 [datasets.val]
-hazy_dir = 'E:\Documents\Computer Vision Learning\Dataset\Validation\hazy'
-clear_dir = 'E:\Documents\Computer Vision Learning\Dataset\Validation\gt'
+hazy_dir = 'E:\Documents\Computer Vision Learning\Image Dehazing Traditional\validation\hazy'
+clear_dir = 'E:\Documents\Computer Vision Learning\Image Dehazing Traditional\validation\clear'
 pairing_strategy = "reside"
 patch_size = 256
 
 # ── Model ────────────────────────────────────────────────────────────────────
 [network]
-type = "dehazenet_hybrid"
-# Hybrid model: shared encoder → physics branch (transmission) + direct branch
-# (residual prediction) → learned fusion gate. Physics recovery happens inside
-# the model, so the training pipeline treats it like a direct-prediction model.
+type = "aodnet"
+# Standard AOD-Net: predicts unified K(x) parameter.
+# J(x) = K(x)*I(x) - K(x) + 1  (no division by t(x))
+# Only ~1.9K parameters — extremely lightweight.
 
 # ── Physical Model ───────────────────────────────────────────────────────────
-# These parameters are used by the model's internal Koschmieder recovery.
-# The training script does NOT run external DCP/physics (hybrid is in DIRECT_MODELS).
+# Not used directly (AOD-Net is end-to-end), kept for reference.
 [physics]
 dark_channel_window = 15
 atm_light_top_percent = 0.01
@@ -35,19 +34,13 @@ t_min = 0.2
 # ── Training ─────────────────────────────────────────────────────────────────
 [train]
 epochs = 100
-loss_type = "mixed"
-grad_clip = true
-grad_clip_value = 1.0
-
-[train.mixed_loss_weights]
-l1 = 1.0            # L1 produces sharper results than MSE
-ssim = 0.1           # Structural similarity for perceptual quality
-perceptual = 0.1     # VGG perceptual loss for natural-looking output
+loss_type = "mse"     # AOD-Net paper uses MSE
+grad_clip = false
 
 [train.optimizer]
 type = "adam"
 lr = 1e-4
-weight_decay = 0.0
+weight_decay = 1e-4   # Per AOD-Net paper
 betas = [0.9, 0.999]
 
 [train.scheduler]

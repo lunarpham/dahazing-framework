@@ -8,6 +8,8 @@ from .dehazenet import DehazeNet
 from .dehazenet_plus import DehazeNetPlus
 from .dehazenet_direct import DehazeNetDirect
 from .dehazenet_hybrid import DehazeNetHybrid
+from .aodnet import AODNet
+from .aodnet_enhanced import AODNetEnhanced
 
 
 # ── Model Registry ───────────────────────────────────────────────────────────
@@ -17,13 +19,12 @@ MODEL_REGISTRY = {
     "dehazenet_plus": DehazeNetPlus,
     "dehazenet_direct": DehazeNetDirect,
     "dehazenet_hybrid": DehazeNetHybrid,
-    # Future models:
-    # "mscnn": MSCNN,
-    # "aodnet": AODNet,
+    "aodnet": AODNet,
+    "aodnet_enhanced": AODNetEnhanced,
 }
 
 # Models that predict clean images directly (no transmission map → physics)
-DIRECT_MODELS = {"dehazenet_direct", "dehazenet_hybrid"}
+DIRECT_MODELS = {"dehazenet_direct", "dehazenet_hybrid", "aodnet", "aodnet_enhanced"}
 
 
 def build_model(config: dict) -> nn.Module:
