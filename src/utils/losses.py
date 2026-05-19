@@ -1,6 +1,6 @@
 """
 Configurable loss functions for DehazeNet.
-Supports MSE, L1, SSIM, Perceptual, Sobel, Laplacian, DCP and weighted combinations.
+Supports MSE, L1, SSIM, Perceptual, Sobel, Laplacian, DCP, Color and weighted combinations.
 """
 
 import torch
@@ -100,6 +100,39 @@ class DarkChannelLoss(nn.Module):
 
         # Mean of dark channel — lower = cleaner image
         return torch.mean(dark_channel)
+
+
+class ColorConsistencyLoss(nn.Module):
+    """
+    Color Consistency Loss — penalizes per-channel mean and variance shifts.
+
+    Motivation:
+        L1/MSE losses minimize pixel-level error, which allows the network to
+        produce grayish, desaturated outputs that are numerically close to the
+        target but visually flat and lifeless. This loss explicitly penalizes
+        differences in per-channel color statistics (mean + standard deviation),
+        encouraging vibrant, color-accurate reconstruction.
+
+        L_color = L1(mean_ch(pred), mean_ch(target))
+                + L1( std_ch(pred),  std_ch(target))
+
+    Reference:
+        Inspired by color constancy losses used in low-light enhancement
+        (e.g., Zero-DCE, RetinexNet).
+    """
+
+    def forward(self, pred, target):
+        # Per-channel mean color
+        mean_loss = F.l1_loss(
+            pred.mean(dim=[2, 3]),
+            target.mean(dim=[2, 3]),
+        )
+        # Per-channel standard deviation (color variance)
+        std_loss = F.l1_loss(
+            pred.std(dim=[2, 3]),
+            target.std(dim=[2, 3]),
+        )
+        return mean_loss + std_loss
 
 
 class SobelLoss(nn.Module):
@@ -221,14 +254,16 @@ class MixedLoss(nn.Module):
     Weighted combination of multiple loss functions.
 
     Supported keys (in mixed_loss_weights config):
-        mse, l1, ssim, perceptual, dcp, sobel, laplacian
+        mse, l1, ssim, perceptual, dcp, sobel, laplacian, color
 
     Example config:
         l1 = 1.0
-        ssim = 0.1
+        ssim = 0.5
         sobel = 0.5
         laplacian = 0.3
         dcp = 0.01
+        perceptual = 0.1
+        color = 0.2
     """
 
     def __init__(self, weights: dict):
@@ -250,6 +285,8 @@ class MixedLoss(nn.Module):
             self.losses["sobel"] = SobelLoss()
         if "laplacian" in weights:
             self.losses["laplacian"] = LaplacianPyramidLoss()
+        if "color" in weights:
+            self.losses["color"] = ColorConsistencyLoss()
 
     def forward(self, pred, target):
         total = 0.0
@@ -264,7 +301,7 @@ def build_loss(config: dict) -> nn.Module:
 
     Config keys used:
         config["train"]["loss_type"]: "mse" | "l1" | "ssim" | "perceptual" |
-                                      "sobel" | "laplacian" | "mixed"
+                                      "sobel" | "laplacian" | "color" | "mixed"
         config["train"]["mixed_loss_weights"]: dict of {loss_name: weight}
 
     Returns:
@@ -285,11 +322,13 @@ def build_loss(config: dict) -> nn.Module:
         return SobelLoss()
     elif loss_type == "laplacian":
         return LaplacianPyramidLoss()
+    elif loss_type == "color":
+        return ColorConsistencyLoss()
     elif loss_type == "mixed":
         weights = train_config.get("mixed_loss_weights", {"mse": 1.0})
         return MixedLoss(weights)
     else:
         raise ValueError(
             f"Unknown loss type: '{loss_type}'. "
-            f"Supported: 'mse', 'l1', 'ssim', 'perceptual', 'sobel', 'laplacian', 'mixed'"
+            f"Supported: 'mse', 'l1', 'ssim', 'perceptual', 'sobel', 'laplacian', 'color', 'mixed'"
         )
