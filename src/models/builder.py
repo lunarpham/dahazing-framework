@@ -51,4 +51,12 @@ def build_model(config: dict) -> nn.Module:
         )
 
     model_class = MODEL_REGISTRY[model_type]
-    return model_class()
+
+    # Forward architecture-specific kwargs from [network] config
+    # (e.g., channels = 64 for AOD-CA-PA-Net)
+    model_kwargs = {k: v for k, v in network_config.items() if k != "type"}
+    try:
+        return model_class(**model_kwargs)
+    except TypeError:
+        # Model doesn't accept extra kwargs — instantiate with defaults
+        return model_class()

@@ -221,8 +221,12 @@ class AODCAPANet(nn.Module):
         self.conv4 = nn.Conv2d(ch * 2, ch, kernel_size=7, stride=1, padding=3)   # cat(L2, L3)
         self.conv5 = nn.Conv2d(ch * 4, ch, kernel_size=3, stride=1, padding=1)   # cat(L1..L4)
 
-        # ── BatchNorm after multi-scale fusion ───────────────────────────────
-        self.bn5 = nn.BatchNorm2d(ch)
+        # ── InstanceNorm after multi-scale fusion ─────────────────────────────
+        # InstanceNorm (not BatchNorm): preserves per-sample color/style
+        # statistics while still stabilizing training. BN averages across the
+        # batch, flattening the per-channel color variance that is essential
+        # for vivid reconstruction — a known issue in image restoration tasks.
+        self.bn5 = nn.InstanceNorm2d(ch, affine=True)
 
         # ── Feature Attention: CA → PA cascade with residual ─────────────────
         self.feature_attention = FeatureAttention(channels=ch)
@@ -260,7 +264,7 @@ class AODCAPANet(nn.Module):
         x4 = self.relu(self.conv4(cat2))                     # (B, CH, H, W)
 
         cat3 = torch.cat((x1, x2, x3, x4), dim=1)           # (B, 4*CH, H, W)
-        f_multi = self.relu(self.bn5(self.conv5(cat3)))      # (B, CH, H, W)
+        f_multi = self.relu(self.bn5(self.conv5(cat3)))      # (B, CH, H, W)  ← InstanceNorm
 
         # ── Step 2: Feature Attention with Residual (CA → PA) ────────────────
         # Residual ensures base features survive even when attention is low.
@@ -331,9 +335,11 @@ class AODCAPANet(nn.Module):
                 )
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d)):
+                if m.weight is not None:
+                    nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
 
 # ── Quick Test ───────────────────────────────────────────────────────────────
