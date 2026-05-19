@@ -10,6 +10,8 @@ from .dehazenet_direct import DehazeNetDirect
 from .dehazenet_hybrid import DehazeNetHybrid
 from .aodnet import AODNet
 from .aodnet_enhanced import AODNetEnhanced
+from .aodnet_pa import AODPANet
+from .aodnet_capa import AODCAPANet
 
 
 # ── Model Registry ───────────────────────────────────────────────────────────
@@ -21,10 +23,12 @@ MODEL_REGISTRY = {
     "dehazenet_hybrid": DehazeNetHybrid,
     "aodnet": AODNet,
     "aodnet_enhanced": AODNetEnhanced,
+    "aodnet_pa": AODPANet,
+    "aodnet_capa": AODCAPANet,
 }
 
 # Models that predict clean images directly (no transmission map → physics)
-DIRECT_MODELS = {"dehazenet_direct", "dehazenet_hybrid", "aodnet", "aodnet_enhanced"}
+DIRECT_MODELS = {"dehazenet_direct", "dehazenet_hybrid", "aodnet", "aodnet_enhanced", "aodnet_pa", "aodnet_capa"}
 
 
 def build_model(config: dict) -> nn.Module:

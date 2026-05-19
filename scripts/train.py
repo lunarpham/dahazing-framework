@@ -30,6 +30,7 @@ from src.utils import (
     copy_config,
     save_training_state,
     load_training_state,
+    TrainingLogger,
 )
 
 
@@ -223,12 +224,22 @@ def train(config_path: str):
     # ── Optimizer, Scheduler, Loss ───────────────────────────────────────────
     optimizer = build_optimizer(model, config)
     scheduler = build_scheduler(optimizer, config)
-    criterion = build_loss(config)
+    criterion = build_loss(config).to(device)   # move buffers (Sobel/Gaussian kernels) to GPU
 
     print(f"Optimizer:      {train_cfg['optimizer']['type']}, lr={train_cfg['optimizer']['lr']}")
     print(f"Scheduler:      {train_cfg.get('scheduler', {}).get('type', 'none')}")
     print(f"Loss:           {train_cfg.get('loss_type', 'mse')}")
     print(f"Epochs:         {train_cfg['epochs']}")
+    print()
+
+    # ── Training Logger ──────────────────────────────────────────────────────
+    training_logger = TrainingLogger(
+        log_dir=config["_paths"]["logs"],
+        exp_name=exp_name,
+    )
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Parameters:     {total_params:,}")
+    print(f"Logging to:     {config['_paths']['logs']}")
     print()
 
     # ── Resume ───────────────────────────────────────────────────────────────
@@ -312,6 +323,7 @@ def train(config_path: str):
 
         # ── Epoch Summary ────────────────────────────────────────────────────
         avg_loss = epoch_loss / max(len(train_loader), 1)
+        lr_current = optimizer.param_groups[0]['lr']
         print(f"  Epoch [{epoch+1}/{epochs}] Average Loss: {avg_loss:.6f}")
 
         # Step the scheduler
@@ -319,6 +331,7 @@ def train(config_path: str):
             scheduler.step()
 
         # ── Validation ───────────────────────────────────────────────────────
+        val_metrics = None
         if val_loader is not None and (epoch + 1) % val_freq == 0:
             val_metrics = validate(
                 model, val_loader, device, physics_cfg, metrics_list,
@@ -327,7 +340,7 @@ def train(config_path: str):
             metrics_str = "  ".join(
                 f"{k.upper()}: {v:.4f}" for k, v in val_metrics.items()
             )
-            print(f"  Validation  →  {metrics_str}")
+            print(f"  Validation  ->  {metrics_str}")
 
             # Track best model by PSNR
             current_psnr = val_metrics.get("psnr", 0.0)
@@ -337,7 +350,15 @@ def train(config_path: str):
                     config["_paths"]["checkpoints"], "best.pth"
                 )
                 torch.save(model.state_dict(), best_path)
-                print(f"  ★ New best PSNR: {best_psnr:.4f}  →  saved to {best_path}")
+                print(f"  * New best PSNR: {best_psnr:.4f}  ->  saved to {best_path}")
+
+        # ── Log Epoch Metrics ────────────────────────────────────────────────
+        training_logger.log_epoch(
+            epoch=epoch + 1,
+            train_loss=avg_loss,
+            lr=lr_current,
+            val_metrics=val_metrics,
+        )
 
         # ── Save Checkpoint ──────────────────────────────────────────────────
         if (epoch + 1) % save_freq == 0:
@@ -365,11 +386,19 @@ def train(config_path: str):
     # ── Final Save ───────────────────────────────────────────────────────────
     final_path = os.path.join(config["_paths"]["checkpoints"], "final.pth")
     torch.save(model.state_dict(), final_path)
-    print(f"{'='*60}")
+
+    # ── Generate Training Analysis ───────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  Generating training analysis...")
+    print(f"{'='*60}\n")
+    training_logger.generate_analysis(total_params=total_params)
+
+    print(f"\n{'='*60}")
     print(f"  Training completed!")
     print(f"  Final model:  {final_path}")
     if best_psnr > 0:
         print(f"  Best PSNR:    {best_psnr:.4f}")
+    print(f"  Logs & plots: {config['_paths']['logs']}")
     print(f"{'='*60}")
 
 

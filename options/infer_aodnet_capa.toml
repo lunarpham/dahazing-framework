@@ -1,21 +1,23 @@
 # ── Experiment ───────────────────────────────────────────────────────────────
-name = "dehazenet_hybrid_reside_its"
+# Must match the 'name' in train_aodnet_capa.toml so that results land in
+# the correct experiment folder: experiments/aodnet_capa_reside_its/results/
+name = "aodnet_capa_reside_its"
 
 # ── Model ────────────────────────────────────────────────────────────────────
 [network]
-type = "dehazenet"
+type = "aodnet_capa"
 
-# ── Physical Model (DCP + Koschmieder) ───────────────────────────────────────
+# ── Physical Model (unused by AOD-CA-PA-Net, kept for pipeline compatibility) ─
 [physics]
 dark_channel_window = 15
-atm_light_top_percent = 0.001
-t_min = 0.1
+atm_light_top_percent = 0.01
+t_min = 0.2
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 [path]
-model_path = "experiments/dehazenet_hybrid_reside_its/checkpoints/best.pth"
-input      = "test_images/"   # single image path or directory
+model_path = "experiments/aodnet_capa_reside_its/checkpoints/best.pth"
+input     = "test_images/"   # single image path or directory
 
 # 'output' is intentionally omitted — infer.py will automatically write to:
-#   experiments/dehazenet_hybrid_reside_its/results/
-# Filenames will be:  <stem>_dehazenet<ext>
+#   experiments/aodnet_capa_reside_its/results/
+# Filenames will be:  <stem>_aodnet_capa<ext>

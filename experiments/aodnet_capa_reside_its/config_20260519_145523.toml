@@ -1,0 +1,80 @@
+# ── Experiment ───────────────────────────────────────────────────────────────
+name = "aodnet_capa_reside_its"
+
+# ── Dataset ─────────────────────────────────────────────────────────────────
+[datasets.train]
+hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\MergedDataset\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Dataset\MergedDataset\clear'
+pairing_strategy = "reside"
+patch_size = 256
+batch_size = 20
+num_workers = 4
+augmentation = ["hflip", "vflip"]
+
+[datasets.val]
+hazy_dir = 'F:\Projects\AI Computer Vision\Validation\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Validation\clear'
+pairing_strategy = "reside"
+patch_size = 256
+
+# ── Model ────────────────────────────────────────────────────────────────────
+[network]
+type = "aodnet_capa"
+# AOD-CA-PA-Net: AOD-Net backbone + Channel Attention -> Pixel Attention cascade.
+#
+# Key improvement over AOD-PA-Net:
+#   Channel Attention (CA) runs FIRST to globally suppress entire feature
+#   channels dominated by atmospheric scattering statistics. Pixel Attention
+#   (PA) then operates on channel-cleaned features where structural depth
+#   cues are no longer overwhelmed by uniform haze — preventing the PA
+#   collapse that causes dense haze under-dehazing and halo artifacts.
+#
+#   ~1,870 total parameters (only ~19 more than AOD-PA-Net).
+
+# ── Physical Model ───────────────────────────────────────────────────────────
+# Not used directly (AOD-CA-PA-Net uses K(x) formulation), kept for reference.
+[physics]
+dark_channel_window = 15
+atm_light_top_percent = 0.01
+t_min = 0.2
+
+# ── Training ─────────────────────────────────────────────────────────────────
+[train]
+epochs = 300
+loss_type = "mixed"
+grad_clip = true
+grad_clip_value = 1.0
+
+[train.mixed_loss_weights]
+# Core pixel fidelity
+l1 = 1.0
+# Structural similarity
+ssim = 0.1
+# Edge-preserving (halo suppression): Sobel enforces gradient matching
+# at depth boundaries; Laplacian enforces multi-scale structural fidelity.
+sobel = 0.5
+laplacian = 0.3
+# Physics regularizer: penalizes residual haze in dark channels
+dcp = 0.01
+
+[train.optimizer]
+type = "adam"
+lr = 1e-4
+weight_decay = 0.0
+betas = [0.9, 0.999]
+
+[train.scheduler]
+type = "cosine"
+T_max = 100
+eta_min = 1e-7
+
+# ── Validation ───────────────────────────────────────────────────────────────
+[val]
+val_freq = 1
+metrics = ["psnr", "ssim"]
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+[logger]
+print_freq = 50
+save_checkpoint_freq = 5
+save_dir = "./experiments"

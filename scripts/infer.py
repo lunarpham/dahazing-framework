@@ -1,6 +1,11 @@
 """
 DehazeNet Inference Script
 Usage: python scripts/infer.py options/infer_dehazenet.toml
+
+Output:
+    Results are saved to  experiments/<name>/results/
+    with filename pattern  <stem>_<checkpoint_name><ext>
+    e.g.  canyon_best.png  /  canyon_epoch_50.png  /  canyon_final.png
 """
 
 import os
@@ -45,10 +50,15 @@ def infer(config_path: str):
 
     # ── Device ───────────────────────────────────────────────────────────────
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    exp_name = config.get('name', 'inference')
+    model_type = config.get('network', {}).get('type', 'dehazenet').lower()
+
     print(f"\n{'='*60}")
     print(f"  DehazeNet Inference")
-    print(f"  Device:  {device}")
-    print(f"  Config:  {config.get('_config_path', config_path)}")
+    print(f"  Experiment:  {exp_name}")
+    print(f"  Model:       {model_type}")
+    print(f"  Device:      {device}")
+    print(f"  Config:      {config.get('_config_path', config_path)}")
     print(f"{'='*60}\n")
 
     # ── Model ────────────────────────────────────────────────────────────────
@@ -65,13 +75,27 @@ def infer(config_path: str):
 
     model.eval()
 
-    model_type = config.get('network', {}).get('type', 'dehazenet').lower()
+    # Derive suffix from the checkpoint filename stem:
+    #   checkpoints/best.pth      → _best
+    #   checkpoints/epoch_50.pth  → _epoch_50
+    #   checkpoints/final.pth     → _final
+    # Falls back to model type name if no checkpoint path is given.
+    if model_path:
+        ckpt_suffix = Path(model_path).stem          # e.g. "best", "epoch_50"
+    else:
+        ckpt_suffix = model_type                     # fallback: "aodnet_capa"
+
     is_direct = model_type in DIRECT_MODELS
-    print(f"Model type: {model_type} ({'direct prediction' if is_direct else 'transmission → physics'})")
+    print(f"Mode:       {'direct prediction' if is_direct else 'transmission → physics'}")
+    print(f"Checkpoint: {ckpt_suffix}")
 
     # ── Input / Output ───────────────────────────────────────────────────────
     input_path = path_cfg.get("input", "test_images/")
-    output_dir = path_cfg.get("output", "results/")
+
+    # If 'output' is not specified, route to experiments/<name>/results/
+    # so results land alongside the model checkpoints and training logs.
+    default_output = os.path.join("experiments", exp_name, "results")
+    output_dir = path_cfg.get("output", default_output)
     os.makedirs(output_dir, exist_ok=True)
 
     images = find_images(input_path)
@@ -79,6 +103,9 @@ def infer(config_path: str):
         print(f"No images found at: {input_path}")
         return
 
+    print(f"Input:  {input_path}")
+    print(f"Output: {output_dir}")
+    print(f"Suffix: _{ckpt_suffix}")
     print(f"Found {len(images)} image(s) to process.\n")
 
     # ── Process Each Image ───────────────────────────────────────────────────
@@ -86,7 +113,8 @@ def infer(config_path: str):
         for idx, img_path in enumerate(images):
             filename = os.path.basename(img_path)
             name, ext = os.path.splitext(filename)
-            output_path = os.path.join(output_dir, f"{name}_dehazed{ext}")
+            # e.g. canyon_best.png / canyon_epoch_50.png
+            output_path = os.path.join(output_dir, f"{name}_{ckpt_suffix}{ext}")
 
             # Load image
             img_np = load_image(img_path)
@@ -120,7 +148,8 @@ def infer(config_path: str):
             save_image(output_path, dehazed)
             print(f"  [{idx+1}/{len(images)}] {filename}  →  {output_path}")
 
-    print(f"\nDone! Results saved to: {output_dir}")
+    print(f"\nDone! {len(images)} image(s) saved to: {output_dir}")
+    print(f"      Filename pattern: <stem>_{ckpt_suffix}<ext>")
 
 
 # ── Entry Point ──────────────────────────────────────────────────────────────

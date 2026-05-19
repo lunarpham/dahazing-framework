@@ -1,6 +1,6 @@
 """
 Configurable loss functions for DehazeNet.
-Supports MSE, L1, SSIM, Perceptual, and weighted combinations.
+Supports MSE, L1, SSIM, Perceptual, Sobel, Laplacian, DCP and weighted combinations.
 """
 
 import torch
@@ -102,10 +102,133 @@ class DarkChannelLoss(nn.Module):
         return torch.mean(dark_channel)
 
 
+class SobelLoss(nn.Module):
+    """
+    Sobel Gradient Loss — edge-preserving loss that penalizes differences in
+    image gradient magnitude between prediction and ground truth.
+
+    Motivation:
+        MSE/L1 losses minimize pixel-level intensity differences, which
+        encourages the network to produce blurry, averaged predictions near
+        depth boundaries. This directly causes halo artifacts.
+
+        SobelLoss enforces gradient consistency: the predicted image must
+        have the same edge magnitudes as the ground truth at every boundary,
+        which prevents halos (spurious gradient peaks along object edges).
+
+    Implementation:
+        Fixed (non-trainable) 3×3 Sobel kernels applied as depthwise
+        convolution over all 3 RGB channels. L1 norm of the magnitude
+        difference is used (not L2) to avoid averaging-induced blur.
+
+            L_sobel = mean( | |∇pred| - |∇target| | )
+
+    Reference:
+        Sobel, I. (1990). An Isotropic 3x3 Image Gradient Operator.
+    """
+
+    def __init__(self):
+        super().__init__()
+        sobel_x = torch.tensor(
+            [[-1., 0., 1.],
+             [-2., 0., 2.],
+             [-1., 0., 1.]], dtype=torch.float32
+        ).view(1, 1, 3, 3)
+        sobel_y = torch.tensor(
+            [[-1., -2., -1.],
+             [ 0.,  0.,  0.],
+             [ 1.,  2.,  1.]], dtype=torch.float32
+        ).view(1, 1, 3, 3)
+
+        # Expand to 3-channel depthwise — non-trainable fixed kernels
+        self.register_buffer('sobel_x', sobel_x.repeat(3, 1, 1, 1))
+        self.register_buffer('sobel_y', sobel_y.repeat(3, 1, 1, 1))
+
+    def _gradient_magnitude(self, x):
+        """Compute per-pixel gradient magnitude using Sobel operators."""
+        gx = F.conv2d(x, self.sobel_x, padding=1, groups=3)
+        gy = F.conv2d(x, self.sobel_y, padding=1, groups=3)
+        # L2 magnitude with epsilon to avoid NaN in sqrt backward pass
+        return torch.sqrt(gx ** 2 + gy ** 2 + 1e-6)
+
+    def forward(self, pred, target):
+        grad_pred   = self._gradient_magnitude(pred)
+        grad_target = self._gradient_magnitude(target)
+        return F.l1_loss(grad_pred, grad_target)
+
+
+class LaplacianPyramidLoss(nn.Module):
+    """
+    Laplacian Pyramid Loss — multi-scale structural loss.
+
+    Motivation:
+        Halos occur at multiple spatial scales simultaneously (macro: building
+        vs. sky; micro: vehicle edge details). A single Sobel pass at full
+        resolution cannot address both. The Laplacian pyramid decomposes an
+        image into frequency bands and enforces structural fidelity at each:
+
+            L_lap = (1/L) * sum_l [ mean(|Lap_l(pred) - Lap_l(target)|) ]
+
+        where Lap_l(I) = I_l - upsample(downsample(I_l)) captures the
+        high-frequency residual at pyramid level l.
+
+    Architecture:
+        Uses a fixed 5×5 Gaussian kernel for blurring (non-trainable).
+        Applied over `num_levels` successive pyramid levels.
+
+    Reference:
+        Burt & Adelson (1983). The Laplacian Pyramid as a Compact Image Code.
+        IEEE Transactions on Communications.
+    """
+
+    def __init__(self, num_levels: int = 3):
+        super().__init__()
+        self.num_levels = num_levels
+
+        # Fixed 5×5 Gaussian kernel
+        g1d = torch.tensor([1., 4., 6., 4., 1.], dtype=torch.float32)
+        g2d = torch.outer(g1d, g1d)
+        g2d = g2d / g2d.sum()
+        kernel = g2d.view(1, 1, 5, 5).repeat(3, 1, 1, 1)
+        self.register_buffer('gaussian_kernel', kernel)
+
+    def _blur_downsample(self, x):
+        """Gaussian blur then 2× spatial downsample."""
+        blurred = F.conv2d(x, self.gaussian_kernel, padding=2, groups=3)
+        return blurred[:, :, ::2, ::2]
+
+    def _laplacian_level(self, x):
+        """One Laplacian band: x - upsample(downsample(x))."""
+        down = self._blur_downsample(x)
+        up   = F.interpolate(down, size=x.shape[2:], mode='bilinear',
+                             align_corners=False)
+        return x - up
+
+    def forward(self, pred, target):
+        total = 0.0
+        p, t = pred, target
+        for _ in range(self.num_levels):
+            lap_p = self._laplacian_level(p)
+            lap_t = self._laplacian_level(t)
+            total = total + F.l1_loss(lap_p, lap_t)
+            p = self._blur_downsample(p)
+            t = self._blur_downsample(t)
+        return total / self.num_levels
+
+
 class MixedLoss(nn.Module):
     """
     Weighted combination of multiple loss functions.
-    Example: 1.0 * L1 + 0.2 * (1 - SSIM) + 0.1 * Perceptual + 0.01 * DCP
+
+    Supported keys (in mixed_loss_weights config):
+        mse, l1, ssim, perceptual, dcp, sobel, laplacian
+
+    Example config:
+        l1 = 1.0
+        ssim = 0.1
+        sobel = 0.5
+        laplacian = 0.3
+        dcp = 0.01
     """
 
     def __init__(self, weights: dict):
@@ -123,6 +246,10 @@ class MixedLoss(nn.Module):
             self.losses["perceptual"] = PerceptualLoss()
         if "dcp" in weights:
             self.losses["dcp"] = DarkChannelLoss()
+        if "sobel" in weights:
+            self.losses["sobel"] = SobelLoss()
+        if "laplacian" in weights:
+            self.losses["laplacian"] = LaplacianPyramidLoss()
 
     def forward(self, pred, target):
         total = 0.0
@@ -136,7 +263,8 @@ def build_loss(config: dict) -> nn.Module:
     Build a loss function from configuration.
 
     Config keys used:
-        config["train"]["loss_type"]: "mse" | "l1" | "ssim" | "perceptual" | "mixed"
+        config["train"]["loss_type"]: "mse" | "l1" | "ssim" | "perceptual" |
+                                      "sobel" | "laplacian" | "mixed"
         config["train"]["mixed_loss_weights"]: dict of {loss_name: weight}
 
     Returns:
@@ -153,12 +281,15 @@ def build_loss(config: dict) -> nn.Module:
         return SSIMLoss()
     elif loss_type == "perceptual":
         return PerceptualLoss()
+    elif loss_type == "sobel":
+        return SobelLoss()
+    elif loss_type == "laplacian":
+        return LaplacianPyramidLoss()
     elif loss_type == "mixed":
         weights = train_config.get("mixed_loss_weights", {"mse": 1.0})
         return MixedLoss(weights)
     else:
         raise ValueError(
             f"Unknown loss type: '{loss_type}'. "
-            f"Supported: 'mse', 'l1', 'ssim', 'perceptual', 'mixed'"
+            f"Supported: 'mse', 'l1', 'ssim', 'perceptual', 'sobel', 'laplacian', 'mixed'"
         )
-
