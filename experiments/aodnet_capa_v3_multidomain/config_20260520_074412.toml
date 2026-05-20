@@ -1,35 +1,31 @@
 # ── Experiment ───────────────────────────────────────────────────────────────
-name = "aodnet_capa_reside_its"
+name = "aodnet_capa_v3_multidomain"
 
 # ── Dataset ─────────────────────────────────────────────────────────────────
 [datasets.train]
 hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\MergedDataset\hazy'
 clear_dir = 'F:\Projects\AI Computer Vision\Dataset\MergedDataset\clear'
 pairing_strategy = "reside"
-patch_size = 256
-batch_size = 20
+patch_size = 128
+batch_size = 15
 num_workers = 4
 augmentation = ["hflip", "vflip"]
+domain_balanced_sampling = true  # ensure minority domains get fair training
 
 [datasets.val]
 hazy_dir = 'F:\Projects\AI Computer Vision\Validation\hazy'
 clear_dir = 'F:\Projects\AI Computer Vision\Validation\clear'
 pairing_strategy = "reside"
-patch_size = 256
+patch_size = 128
 
 # ── Model ────────────────────────────────────────────────────────────────────
 [network]
 type = "aodnet_capa"
-# AOD-CA-PA-Net: AOD-Net backbone + Channel Attention -> Pixel Attention cascade.
-#
-# Key improvement over AOD-PA-Net:
-#   Channel Attention (CA) runs FIRST to globally suppress entire feature
-#   channels dominated by atmospheric scattering statistics. Pixel Attention
-#   (PA) then operates on channel-cleaned features where structural depth
-#   cues are no longer overwhelmed by uniform haze — preventing the PA
-#   collapse that causes dense haze under-dehazing and halo artifacts.
-#
-#   ~1,870 total parameters (only ~19 more than AOD-PA-Net).
+channels = 96             # backbone width — increased for multi-domain capacity
+num_fa_blocks = 3         # stacked FA blocks — progressive attention refinement
+refine_channels = 32      # color refinement tail hidden width
+# AOD-CA-PA-Net v3: reflection padding + stacked FA + color refinement tail.
+# Designed for multi-domain training (RESIDE + O-Haze + NH-Haze + 3R).
 
 # ── Physical Model ───────────────────────────────────────────────────────────
 # Not used directly (AOD-CA-PA-Net uses K(x) formulation), kept for reference.
@@ -48,14 +44,17 @@ grad_clip_value = 1.0
 [train.mixed_loss_weights]
 # Core pixel fidelity
 l1 = 1.0
-# Structural similarity
-ssim = 0.1
-# Edge-preserving (halo suppression): Sobel enforces gradient matching
-# at depth boundaries; Laplacian enforces multi-scale structural fidelity.
-sobel = 0.5
-laplacian = 0.3
+# Structural similarity — strongest perceptual quality driver
+ssim = 0.8
+# Edge-preserving: reduced since no halos observed, free up gradient budget
+sobel = 0.2
+laplacian = 0.1
 # Physics regularizer: penalizes residual haze in dark channels
 dcp = 0.01
+# VGG feature-level similarity — boosted for vivid, natural appearance
+perceptual = 0.3
+# Per-channel color consistency — boosted to fight desaturation
+color = 0.5
 
 [train.optimizer]
 type = "adam"
@@ -65,7 +64,7 @@ betas = [0.9, 0.999]
 
 [train.scheduler]
 type = "cosine"
-T_max = 100
+T_max = 300    # match total epochs — single smooth cosine decay, no restarts
 eta_min = 1e-7
 
 # ── Validation ───────────────────────────────────────────────────────────────

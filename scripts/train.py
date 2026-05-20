@@ -13,13 +13,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+import torchvision.utils as vutils
 
 # Ensure project root is on path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.models import build_model, DIRECT_MODELS
-from src.datasets import DehazeDataset
+from src.datasets import DehazeDataset, build_domain_balanced_sampler
 from src.core import get_dark_channel, estimate_atmospheric_light, recover_image
 from src.utils import (
     calculate_psnr,
@@ -31,6 +32,7 @@ from src.utils import (
     save_training_state,
     load_training_state,
     TrainingLogger,
+    save_image,
 )
 
 
@@ -87,12 +89,15 @@ def build_scheduler(optimizer: optim.Optimizer, config: dict):
 
 @torch.no_grad()
 def validate(model, val_loader, device, physics_config, metrics_list,
-             is_direct=False):
+             is_direct=False, save_dir=None, epoch=None, max_save=5):
     """
-    Run validation and return average metrics.
+    Run validation, return average metrics, and optionally save sample images.
     
     Args:
         is_direct: If True, model outputs clean image directly (no physics).
+        save_dir:  If provided, save side-by-side comparison images here.
+        epoch:     Current epoch number (used in saved filenames).
+        max_save:  Maximum number of sample images to save per validation.
     
     Returns:
         dict of {metric_name: average_value}
@@ -100,6 +105,13 @@ def validate(model, val_loader, device, physics_config, metrics_list,
     model.eval()
     totals = {m: 0.0 for m in metrics_list}
     count = 0
+    saved_count = 0
+
+    # Create epoch-specific subfolder for saved images
+    epoch_save_dir = None
+    if save_dir is not None and epoch is not None:
+        epoch_save_dir = os.path.join(save_dir, f"epoch_{epoch:03d}")
+        os.makedirs(epoch_save_dir, exist_ok=True)
 
     for batch in val_loader:
         hazy = batch['hazy'].to(device)
@@ -134,7 +146,21 @@ def validate(model, val_loader, device, physics_config, metrics_list,
             if "ssim" in metrics_list:
                 totals["ssim"] += calculate_ssim(pred_i, clear_i).item()
 
+            # Save side-by-side comparison: hazy | dehazed | ground truth
+            if epoch_save_dir is not None and saved_count < max_save:
+                comparison = torch.cat([
+                    hazy[i:i+1], J_pred[i:i+1], clear[i:i+1]
+                ], dim=3)  # concatenate width-wise
+                save_path = os.path.join(
+                    epoch_save_dir, f"val_{saved_count:03d}.png"
+                )
+                save_image(save_path, comparison)
+                saved_count += 1
+
         count += batch_size
+
+    if epoch_save_dir is not None and saved_count > 0:
+        print(f"  Saved {saved_count} validation images to: {epoch_save_dir}")
 
     model.train()
 
@@ -181,12 +207,27 @@ def train(config_path: str):
         strategy=train_ds_cfg.get("pairing_strategy", "reside"),
         augmentation=train_ds_cfg.get("augmentation", ["hflip", "vflip"]),
     )
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=train_ds_cfg.get("batch_size", 8),
-        shuffle=True,
-        num_workers=train_ds_cfg.get("num_workers", 4),
-    )
+    # Domain-balanced sampling: ensures minority domains (O-Haze, NH-Haze,
+    # 3R nighttime) get fair training time when mixed with majority RESIDE.
+    use_balanced = train_ds_cfg.get("domain_balanced_sampling", False)
+    if use_balanced:
+        sampler, domain_counts = build_domain_balanced_sampler(train_dataset)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=train_ds_cfg.get("batch_size", 8),
+            sampler=sampler,       # weighted sampling (replaces shuffle)
+            num_workers=train_ds_cfg.get("num_workers", 4),
+        )
+        print(f"Domain-balanced sampling enabled:")
+        for domain, count in sorted(domain_counts.items()):
+            print(f"  {domain:>12s}: {count} samples")
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=train_ds_cfg.get("batch_size", 8),
+            shuffle=True,
+            num_workers=train_ds_cfg.get("num_workers", 4),
+        )
     print(f"Training set:   {len(train_dataset)} pairs")
 
     # Validation dataset (optional)
@@ -335,7 +376,9 @@ def train(config_path: str):
         if val_loader is not None and (epoch + 1) % val_freq == 0:
             val_metrics = validate(
                 model, val_loader, device, physics_cfg, metrics_list,
-                is_direct=is_direct
+                is_direct=is_direct,
+                save_dir=config["_paths"]["results"],
+                epoch=epoch + 1,
             )
             metrics_str = "  ".join(
                 f"{k.upper()}: {v:.4f}" for k, v in val_metrics.items()

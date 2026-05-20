@@ -1,51 +1,63 @@
 """
-AOD-CA-PA-Net: AOD-Net + Channel Attention → Pixel Attention Cascade.
+AOD-CA-PA-Net v3: AOD-Net + Channel Attention → Pixel Attention Cascade
+                  + Reflection Padding + Color Refinement Tail.
 
-Extends AOD-PA-Net by inserting a Channel Attention (CA) module *before*
-the Pixel Attention (PA) block, forming the Feature Attention (FA) cascade
-inspired by FFA-Net.
+Extends v2 with critical improvements for multi-domain training:
 
-Why the cascade matters:
-    In dense haze, feature channels become dominated by uniform atmospheric
-    scattering statistics. Pixel Attention fed these uniform features cannot
-    differentiate a white vehicle from the ambient fog — it collapses.
+    1. Reflection Padding:
+        Replaces zero padding on all spatial convolutions. Zero padding
+        injects artificial zeros at image boundaries, which create visible
+        edge artifacts when large kernels (5×5, 7×7) are used. Reflection
+        padding mirrors edge pixels, producing seamless boundary features.
 
-    Channel Attention first:
-        Identifies which channels carry atmospheric scattering signal vs.
-        scene structure, then suppresses the haze-dominated channels via
-        learned per-channel weights (squeeze-and-excitation style).
+    2. Stacked Feature Attention (N× FA blocks):
+        A single FA block cannot learn domain-specific attention patterns
+        for multiple haze types (synthetic RESIDE, real O-Haze/NH-Haze,
+        nighttime 3R). Stacking multiple FA blocks in sequence gives the
+        network depth to specialize: early blocks handle gross haze
+        suppression, later blocks refine domain-specific features.
 
-    Pixel Attention second:
-        Now operates on channel-cleaned features, where structural edges
-        and depth cues are no longer overwhelmed by haze statistics.
-        Spatial weights are meaningful and prevent halos.
+    3. Color Refinement Tail:
+        The AOD-Net formula J = K·I − K + 1 is a per-channel affine
+        transform: J_c = K_c·(I_c − 1) + 1. This cannot produce cross-
+        channel color interactions. The refinement tail applies a learned
+        nonlinear residual:
 
-Architecture Flow (v2 — wider backbone + residual attention):
+            J_final = J_k + α · Refine(J_k)
+
+        where Refine is a lightweight ConvNet with Tanh output, and α is
+        a learnable scaling factor (initialized to 0.1).
+
+Architecture Flow (v3):
     I(x)
       ↓
-    [Conv1×1 → Conv3×3 → Conv5×5 → Conv7×7] (multi-scale backbone, 32ch)
-      ↓ cat (128 channels)
-    [Conv3×3 + BN] → F_multi  (32 channels)
+    [ReflPad+Conv1×1 → ReflPad+Conv3×3 → ReflPad+Conv5×5 → ReflPad+Conv7×7]
+      ↓ cat (4×CH channels)
+    [ReflPad+Conv3×3 + InstanceNorm] → F_multi  (CH channels)
       ↓
-    ┌── Feature Attention (with residual) ──────────────┐
-    │  CA: GlobalAvgPool → FC(32→4) → ReLU → FC → Sig │
-    │  PA: Conv1×1(32→4) → ReLU → Conv1×1(4→1) → Sig  │
-    │  F_attended = F_multi + CA(F_multi) ⊙ PA(...)     │  ← residual
-    └───────────────────────────────────────────────────┘
+    ┌── FA Block ×N (stacked, each with residual) ─────────┐
+    │  CA: GlobalAvgPool → FC → ReLU → FC → Sig           │
+    │  PA: Conv1×1 → ReLU → Conv1×1 → Sig                 │
+    │  F = F + CA(F) ⊙ PA(CA(F))                          │
+    └──────────────────────────────────────────────────────┘
       ↓
-    [Conv3×3 → ReLU → Conv3×3] → K(x)  (deeper 2-layer head)
+    [ReflPad+Conv3×3 → ReLU → ReflPad+Conv3×3] → K(x)
       ↓
-    J(x) = K(x)·I(x) − K(x) + 1   (clamped to [0,1])
+    J_k = K(x)·I(x) − K(x) + 1
+      ↓
+    J_final = J_k + α · Refine(J_k)   ← color refinement tail
+      ↓
+    clamp [0, 1]
 
 Physics:
     Standard ASM:  J(x) = (I(x) - A) / t(x) + A    ← unstable (divides by t)
     AOD-Net:       J(x) = K(x)·I(x) - K(x) + 1     ← no division, stable
+    v3 tail:       J(x) += α · Refine(J)             ← nonlinear color fix
 
 References:
     Li et al. (2017). AOD-Net: All-in-One Dehazing Network. ICCV.
     Qin et al. (2020). FFA-Net: Feature Fusion Attention Network. AAAI.
 
-Estimated parameters: ~45,000  (still very lightweight — FFA-Net has 4.5M)
 Output: (B, 3, H, W) dehazed image in [0, 1].
 """
 
@@ -57,6 +69,29 @@ import torch.nn.functional as F
 # ── Default backbone width ───────────────────────────────────────────────────
 
 DEFAULT_CHANNELS = 32
+DEFAULT_NUM_FA_BLOCKS = 3
+
+
+# ── Reflection-padded convolution helper ─────────────────────────────────────
+
+class ReflPadConv2d(nn.Module):
+    """
+    Conv2d with reflection padding instead of zero padding.
+
+    Zero padding injects artificial zeros at image boundaries, producing
+    visible edge artifacts especially with large kernels (5×5, 7×7).
+    Reflection padding mirrors edge pixels for seamless boundary features.
+    """
+
+    def __init__(self, in_ch, out_ch, kernel_size, stride=1):
+        super().__init__()
+        pad = kernel_size // 2
+        self.pad = nn.ReflectionPad2d(pad) if pad > 0 else nn.Identity()
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size, stride=stride,
+                              padding=0)  # padding handled by ReflectionPad2d
+
+    def forward(self, x):
+        return self.conv(self.pad(x))
 
 
 # ── Channel Attention (Squeeze-and-Excitation style) ─────────────────────────
@@ -70,7 +105,7 @@ class ChannelAttention(nn.Module):
     atmospheric scattering while preserving structurally-informative channels.
 
     Architecture:
-        GlobalAvgPool → FC(C → C//8, min 1) → ReLU → FC(C//8 → C) → Sigmoid
+        GlobalAvgPool → FC(C → C//r, min 1) → ReLU → FC(C//r → C) → Sigmoid
 
     Args:
         channels: Number of input feature channels.
@@ -148,13 +183,7 @@ class FeatureAttention(nn.Module):
     Feature Attention (FA) cascade: Channel Attention followed by Pixel
     Attention, wrapped in a residual connection.
 
-    Mirrors the FA module from FFA-Net with a critical addition: the residual
-    skip connection ensures that base features always flow through even when
-    both CA and PA assign low weights. This prevents the "signal death"
-    problem where two cascaded [0,1] multiplications can suppress features
-    to near-zero, causing K(x) ≈ 0 and washed-out output.
-
-    Output:  F_out = F_multi + CA(F_multi) ⊙ PA(CA(F_multi))
+    Output:  F_out = F_in + CA(F_in) ⊙ PA(CA(F_in))
 
     Args:
         channels: Number of input feature channels.
@@ -168,75 +197,116 @@ class FeatureAttention(nn.Module):
     def forward(self, x):
         """
         Args:
-            x: F_multi feature map (B, C, H, W).
+            x: Feature map (B, C, H, W).
 
         Returns:
-            F_attended: residual-connected, channel- and pixel-attended
-                        features (B, C, H, W).
+            Residual-connected, channel- and pixel-attended features.
         """
         attended = self.ca(x)   # step 1: suppress haze channels
         attended = self.pa(attended)   # step 2: spatially weight remaining features
         return x + attended     # residual: preserves base features
 
 
-# ── AOD-CA-PA-Net ─────────────────────────────────────────────────────────────
+# ── Color Refinement Tail ────────────────────────────────────────────────────
+
+class ColorRefinementTail(nn.Module):
+    """
+    Nonlinear color refinement applied after the K(x) formula.
+
+    The AOD formula J = K·I − K + 1 is a per-channel affine transform
+    that cannot produce cross-channel color interactions. This tail
+    learns a residual correction:
+
+        J_final = J_k + α · Refine(J_k)
+
+    Architecture:
+        ReflPad+Conv3×3 (3→mid) → ReLU →
+        ReflPad+Conv3×3 (mid→mid) → ReLU →
+        ReflPad+Conv3×3 (mid→3) → Tanh
+
+    Args:
+        mid_channels: Width of the hidden layers.
+    """
+
+    def __init__(self, mid_channels: int = 32):
+        super().__init__()
+        self.refine = nn.Sequential(
+            ReflPadConv2d(3, mid_channels, kernel_size=3),
+            nn.ReLU(inplace=True),
+            ReflPadConv2d(mid_channels, mid_channels, kernel_size=3),
+            nn.ReLU(inplace=True),
+            ReflPadConv2d(mid_channels, 3, kernel_size=3),
+            nn.Tanh(),   # output in [-1, 1] — allows both + and - corrections
+        )
+        # Learnable scaling factor — starts small so K-formula output dominates
+        # early training, then grows as the network learns useful corrections.
+        self.alpha = nn.Parameter(torch.tensor(0.1))
+
+    def forward(self, j_k):
+        """
+        Args:
+            j_k: K-formula output J = K·I − K + 1, shape (B, 3, H, W).
+
+        Returns:
+            Color-refined output, same shape (B, 3, H, W). NOT clamped here.
+        """
+        return j_k + self.alpha * self.refine(j_k)
+
+
+# ── AOD-CA-PA-Net v3 ─────────────────────────────────────────────────────────
 
 class AODCAPANet(nn.Module):
     """
-    AOD-Net + Channel Attention → Pixel Attention cascade (AOD-CA-PA-Net v2).
+    AOD-Net + Channel Attention → Pixel Attention cascade (AOD-CA-PA-Net v3).
 
-    Key improvements over v1:
-        1. Wider backbone (3→32ch): ~25× more feature capacity for diverse
-           haze patterns and spatially-varying K(x) estimation.
-        2. Residual Feature Attention: skip connection prevents signal death
-           from cascaded [0,1] multiplications, eliminating washed-out output.
-        3. Deeper K(x) head (2-layer): better mapping from attended features
-           to the K parameter, improving dynamic range.
-        4. BatchNorm after fusion: stabilizes feature distributions before
-           the attention block, improving training convergence.
+    Key features:
+        1. Reflection padding: eliminates edge artifacts from zero padding.
+        2. Stacked FA blocks (default 3): multiple attention refinement stages
+           for multi-domain haze handling (synthetic + real + nighttime).
+        3. Color refinement tail (3→32→32→3): breaks through the K-formula's
+           per-channel linear ceiling for vivid color restoration.
+        4. InstanceNorm: preserves per-sample color statistics.
+        5. Configurable backbone width via `channels` parameter.
 
-    Architecture (multi-scale backbone + residual FA cascade):
-        Layer 1: Conv2d 1×1  (3→CH)    — point-wise feature extraction
-        Layer 2: Conv2d 3×3  (CH→CH)   — local features
-        Layer 3: Conv2d 5×5  (2CH→CH)  — cat(L1,L2) → medium-range context
-        Layer 4: Conv2d 7×7  (2CH→CH)  — cat(L2,L3) → wide-range context
-        Layer 5: Conv2d 3×3  (4CH→CH)  — cat(L1,L2,L3,L4) → F_multi + BN
-
-        FA Block: F_multi + CA→PA(F_multi)  ← residual attention
-
-        K Head:  Conv2d 3×3 (CH→CH) + ReLU → Conv2d 3×3 (CH→3) + ReLU → K(x)
-
-    Image recovery:
-        J(x) = K(x) * I(x) - K(x) + 1
+    Args:
+        channels: Backbone feature width (default 32).
+        num_fa_blocks: Number of stacked Feature Attention blocks (default 3).
+        refine_channels: Hidden width of the color refinement tail (default 32).
     """
 
-    def __init__(self, channels: int = DEFAULT_CHANNELS):
+    def __init__(self, channels: int = DEFAULT_CHANNELS,
+                 num_fa_blocks: int = DEFAULT_NUM_FA_BLOCKS,
+                 refine_channels: int = 32):
         super().__init__()
         ch = channels
 
-        # ── Multi-scale feature extraction (widened AOD-Net backbone) ────────
-        self.conv1 = nn.Conv2d(3, ch, kernel_size=1, stride=1, padding=0)
-        self.conv2 = nn.Conv2d(ch, ch, kernel_size=3, stride=1, padding=1)
-        self.conv3 = nn.Conv2d(ch * 2, ch, kernel_size=5, stride=1, padding=2)   # cat(L1, L2)
-        self.conv4 = nn.Conv2d(ch * 2, ch, kernel_size=7, stride=1, padding=3)   # cat(L2, L3)
-        self.conv5 = nn.Conv2d(ch * 4, ch, kernel_size=3, stride=1, padding=1)   # cat(L1..L4)
+        # ── Multi-scale feature extraction (reflection-padded) ───────────────
+        self.conv1 = ReflPadConv2d(3, ch, kernel_size=1)
+        self.conv2 = ReflPadConv2d(ch, ch, kernel_size=3)
+        self.conv3 = ReflPadConv2d(ch * 2, ch, kernel_size=5)    # cat(L1, L2)
+        self.conv4 = ReflPadConv2d(ch * 2, ch, kernel_size=7)    # cat(L2, L3)
+        self.conv5 = ReflPadConv2d(ch * 4, ch, kernel_size=3)    # cat(L1..L4)
 
         # ── InstanceNorm after multi-scale fusion ─────────────────────────────
-        # InstanceNorm (not BatchNorm): preserves per-sample color/style
-        # statistics while still stabilizing training. BN averages across the
-        # batch, flattening the per-channel color variance that is essential
-        # for vivid reconstruction — a known issue in image restoration tasks.
-        self.bn5 = nn.InstanceNorm2d(ch, affine=True)
+        self.norm5 = nn.InstanceNorm2d(ch, affine=True)
 
-        # ── Feature Attention: CA → PA cascade with residual ─────────────────
-        self.feature_attention = FeatureAttention(channels=ch)
+        # ── Stacked Feature Attention blocks ─────────────────────────────────
+        # Multiple FA blocks allow the network to progressively refine
+        # attention: early blocks handle gross haze suppression, later
+        # blocks refine domain-specific features.
+        self.fa_blocks = nn.Sequential(*[
+            FeatureAttention(channels=ch) for _ in range(num_fa_blocks)
+        ])
 
-        # ── K(x) estimation (deeper 2-layer head) ───────────────────────────
+        # ── K(x) estimation (deeper 2-layer head, reflection-padded) ─────────
         self.k_estimator = nn.Sequential(
-            nn.Conv2d(ch, ch, kernel_size=3, stride=1, padding=1),
+            ReflPadConv2d(ch, ch, kernel_size=3),
             nn.ReLU(inplace=True),
-            nn.Conv2d(ch, 3, kernel_size=3, stride=1, padding=1),
+            ReflPadConv2d(ch, 3, kernel_size=3),
         )
+
+        # ── Color Refinement Tail ────────────────────────────────────────────
+        self.color_refine = ColorRefinementTail(mid_channels=refine_channels)
 
         self.relu = nn.ReLU(inplace=True)
 
@@ -245,13 +315,13 @@ class AODCAPANet(nn.Module):
 
     def forward(self, x):
         """
-        Forward pass: multi-scale backbone → BN → residual CA→PA → K(x) → J(x).
+        Forward pass: backbone → IN → stacked FA → K(x) → AOD → color refine.
 
         Args:
             x: Hazy input image I(x), shape (B, 3, H, W) in [0, 1].
 
         Returns:
-            Clean image J(x) = K(x)*I(x) - K(x) + 1, clamped to [0, 1].
+            Clean image, clamped to [0, 1].
         """
         # ── Step 1: Multi-Scale Feature Extraction ───────────────────────────
         x1 = self.relu(self.conv1(x))                        # (B, CH, H, W)
@@ -264,61 +334,67 @@ class AODCAPANet(nn.Module):
         x4 = self.relu(self.conv4(cat2))                     # (B, CH, H, W)
 
         cat3 = torch.cat((x1, x2, x3, x4), dim=1)           # (B, 4*CH, H, W)
-        f_multi = self.relu(self.bn5(self.conv5(cat3)))      # (B, CH, H, W)  ← InstanceNorm
+        f_multi = self.relu(self.norm5(self.conv5(cat3)))    # (B, CH, H, W)
 
-        # ── Step 2: Feature Attention with Residual (CA → PA) ────────────────
-        # Residual ensures base features survive even when attention is low.
-        # CA first: suppresses channels dominated by uniform haze statistics.
-        # PA second: maps spatial haze density on the channel-cleaned features.
-        f_attended = self.feature_attention(f_multi)         # (B, CH, H, W)
+        # ── Step 2: Stacked Feature Attention ────────────────────────────────
+        f_attended = self.fa_blocks(f_multi)                 # (B, CH, H, W)
 
-        # ── Step 3: K(x) Estimation (deeper 2-layer head) ───────────────────
+        # ── Step 3: K(x) Estimation ──────────────────────────────────────────
         k = self.relu(self.k_estimator(f_attended))          # (B, 3, H, W)
 
-        # ── Step 4: Image Reconstruction ─────────────────────────────────────
-        # J(x) = K(x) * I(x) - K(x) + b,  where b = 1
-        clean = k * x - k + 1.0
+        # ── Step 4: AOD Physics Formula ──────────────────────────────────────
+        j_k = k * x - k + 1.0
+
+        # ── Step 5: Color Refinement ─────────────────────────────────────────
+        clean = self.color_refine(j_k)
 
         return torch.clamp(clean, 0.0, 1.0)
 
     def forward_with_maps(self, x):
         """
-        Diagnostic forward pass returning K(x), CA weights, and PA attention map.
+        Diagnostic forward pass returning K(x), CA weights, PA map from
+        the last FA block, and the pre-refinement K-formula output.
 
         Returns:
             dict with keys:
                 'output':       Final dehazed image (B, 3, H, W)
+                'j_k':          Pre-refinement K-formula output (B, 3, H, W)
                 'k_map':        Predicted K(x) parameter (B, 3, H, W)
-                'ca_weights':   Per-channel CA weights (B, CH) in [0, 1]
-                'pa_map':       Spatial PA attention map (B, 1, H, W)
+                'ca_weights':   Per-channel CA weights from last FA (B, CH)
+                'pa_map':       Spatial PA map from last FA (B, 1, H, W)
+                'refine_alpha': Color refinement scaling factor (scalar)
         """
         x1 = self.relu(self.conv1(x))
         x2 = self.relu(self.conv2(x1))
         x3 = self.relu(self.conv3(torch.cat((x1, x2), dim=1)))
         x4 = self.relu(self.conv4(torch.cat((x2, x3), dim=1)))
-        f_multi = self.relu(self.bn5(self.conv5(torch.cat((x1, x2, x3, x4), dim=1))))
+        f_multi = self.relu(self.norm5(self.conv5(
+            torch.cat((x1, x2, x3, x4), dim=1)
+        )))
 
-        # Extract CA weights (before multiplying)
-        fa = self.feature_attention
-        ca_weights_flat = fa.ca.ca(f_multi)            # (B, CH)
+        # Run through stacked FA blocks, extract maps from the last one
+        f = f_multi
+        for fa_block in self.fa_blocks:
+            f = fa_block(f)
+
+        # Extract diagnostics from the last FA block
+        last_fa = self.fa_blocks[-1]
+        ca_weights_flat = last_fa.ca.ca(f)
         ca_weights = ca_weights_flat.unsqueeze(-1).unsqueeze(-1)
-        f_ca = f_multi * ca_weights                    # channel-attended features
+        f_ca = f * ca_weights
+        pa_map = last_fa.pa.pa(f_ca)
 
-        # Extract PA map
-        pa_map = fa.pa.pa(f_ca)                        # (B, 1, H, W)
-        f_attended_branch = f_ca * pa_map
-
-        # Apply residual (matching forward() behavior)
-        f_attended = f_multi + f_attended_branch
-
-        k = self.relu(self.k_estimator(f_attended))
-        clean = torch.clamp(k * x - k + 1.0, 0.0, 1.0)
+        k = self.relu(self.k_estimator(f))
+        j_k = k * x - k + 1.0
+        clean = torch.clamp(self.color_refine(j_k), 0.0, 1.0)
 
         return {
-            'output':     clean,
-            'k_map':      k,
-            'ca_weights': ca_weights_flat,             # (B, CH) — one per channel
-            'pa_map':     pa_map,                      # (B, 1, H, W) — spatial
+            'output':       clean,
+            'j_k':          torch.clamp(j_k, 0.0, 1.0),
+            'k_map':        k,
+            'ca_weights':   ca_weights_flat,
+            'pa_map':       pa_map,
+            'refine_alpha': self.color_refine.alpha.item(),
         }
 
     def _initialize_weights(self):
@@ -346,36 +422,36 @@ class AODCAPANet(nn.Module):
 
 if __name__ == "__main__":
     dummy = torch.rand(1, 3, 256, 256)
-    model = AODCAPANet()
+    model = AODCAPANet(channels=96, num_fa_blocks=3, refine_channels=32)
 
     total_params  = sum(p.numel() for p in model.parameters())
-    fa_params     = sum(p.numel() for p in model.feature_attention.parameters())
-    ca_params     = sum(p.numel() for p in model.feature_attention.ca.parameters())
-    pa_params     = sum(p.numel() for p in model.feature_attention.pa.parameters())
     backbone_params = sum(
         p.numel() for name, p in model.named_parameters()
-        if name.startswith('conv') or name.startswith('bn')
+        if name.startswith('conv') or name.startswith('norm')
     )
+    fa_params     = sum(p.numel() for p in model.fa_blocks.parameters())
     k_params      = sum(p.numel() for p in model.k_estimator.parameters())
+    refine_params = sum(p.numel() for p in model.color_refine.parameters())
 
     output = model(dummy)
     diag   = model.forward_with_maps(dummy)
 
     print("=" * 60)
-    print("  AOD-CA-PA-Net v2: Wider Backbone + Residual Attention")
+    print("  AOD-CA-PA-Net v3: Stacked FA + Color Refinement")
     print("=" * 60)
     print(f"  Input shape:        {dummy.shape}")
     print(f"  Output shape:       {output.shape}")
     print(f"  K(x) map shape:     {diag['k_map'].shape}")
+    print(f"  J_k (pre-refine):   [{diag['j_k'].min():.4f}, {diag['j_k'].max():.4f}]")
     print(f"  CA weights shape:   {diag['ca_weights'].shape}  (per-channel)")
     print(f"  PA map shape:       {diag['pa_map'].shape}  (spatial)")
     print(f"  PA map range:       [{diag['pa_map'].min():.4f}, {diag['pa_map'].max():.4f}]")
+    print(f"  Refine alpha:       {diag['refine_alpha']:.4f}")
     print(f"  Total parameters:   {total_params:,}")
-    print(f"    Backbone + BN:    {backbone_params:,}")
-    print(f"    FA block:         {fa_params:,}")
-    print(f"      CA:             {ca_params:,}")
-    print(f"      PA:             {pa_params:,}")
+    print(f"    Backbone + Norm:  {backbone_params:,}")
+    print(f"    FA blocks (×3):   {fa_params:,}")
     print(f"    K head:           {k_params:,}")
+    print(f"    Color refine:     {refine_params:,}")
     print("=" * 60)
-    print("  [OK] AOD-CA-PA-Net v2 is working correctly!")
+    print("  [OK] AOD-CA-PA-Net v3 is working correctly!")
     print("=" * 60)
