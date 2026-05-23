@@ -9,15 +9,15 @@ def get_dark_channel(img, window_size=15):
     # Min over channels
     min_pool = torch.min(img, dim=1, keepdim=True)[0]
     
-    # Min over spatial patch
+    # Min over spatial patch using the negative sign trick
     pad = window_size // 2
-    dark_channel = F.max_pool2d(
-        (1 - min_pool), # Invert because max_pool finds max, we want min
+    dark_channel = -F.max_pool2d(
+        -min_pool, 
         kernel_size=window_size,
         stride=1,
         padding=pad
     )
-    return 1 - dark_channel
+    return dark_channel
 
 def estimate_atmospheric_light(img, dark_channel, top_percent=0.001):
     """

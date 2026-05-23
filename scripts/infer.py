@@ -23,6 +23,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.models import build_model, DIRECT_MODELS
 from src.core import get_dark_channel, estimate_atmospheric_light, recover_image
 from src.utils import load_image, to_tensor, save_image, parse_config, post_process
+import numpy as np
 
 
 def find_images(path: str) -> list:
@@ -40,7 +41,7 @@ def find_images(path: str) -> list:
         raise FileNotFoundError(f"Input path not found: {path}")
 
 
-def infer(config_path: str):
+def infer(config_path: str, passes_override: int = None, enhance: bool = False):
     """Main inference pipeline driven by TOML config."""
 
     # ── Parse Config ─────────────────────────────────────────────────────────
@@ -53,11 +54,19 @@ def infer(config_path: str):
     exp_name = config.get('name', 'inference')
     model_type = config.get('network', {}).get('type', 'dehazenet').lower()
 
+    # ── Inference settings ────────────────────────────────────────────────────
+    infer_cfg = config.get("infer", {})
+    num_passes = infer_cfg.get("passes", 1)
+    if passes_override is not None:
+        num_passes = passes_override
+
     print(f"\n{'='*60}")
     print(f"  DehazeNet Inference")
     print(f"  Experiment:  {exp_name}")
     print(f"  Model:       {model_type}")
     print(f"  Device:      {device}")
+    print(f"  Passes:      {num_passes}{'  (iterative)' if num_passes > 1 else ''}")
+    print(f"  Enhance:     {'ON (CLAHE + gamma)' if enhance else 'OFF'}")
     print(f"  Config:      {config.get('_config_path', config_path)}")
     print(f"{'='*60}\n")
 
@@ -83,7 +92,7 @@ def infer(config_path: str):
     if model_path:
         ckpt_suffix = Path(model_path).stem          # e.g. "best", "epoch_50"
     else:
-        ckpt_suffix = model_type                     # fallback: "aodnet_capa"
+        ckpt_suffix = model_type                     # fallback: "msfa_net"
 
     is_direct = model_type in DIRECT_MODELS
     print(f"Mode:       {'direct prediction' if is_direct else 'transmission → physics'}")
@@ -120,29 +129,42 @@ def infer(config_path: str):
             img_np = load_image(img_path)
             img_tensor = to_tensor(img_np).to(device)
 
-            # Forward pass
-            if is_direct:
-                # Direct model: output IS the clean image
-                dehazed = model(img_tensor)
-            else:
-                # Transmission-based model: predict t(x), then physics
-                t_pred = model(img_tensor)
+            # Forward pass (multi-pass for dense haze)
+            current = img_tensor
+            for pass_idx in range(num_passes):
+                if is_direct:
+                    current = model(current)
+                else:
+                    t_pred = model(current)
+                    dark_channel = get_dark_channel(
+                        current,
+                        window_size=physics_cfg.get("dark_channel_window", 15)
+                    )
+                    atm_light = estimate_atmospheric_light(
+                        current, dark_channel,
+                        top_percent=physics_cfg.get("atm_light_top_percent", 0.001)
+                    )
+                    current = recover_image(
+                        current, t_pred, atm_light,
+                        t0=physics_cfg.get("t_min", 0.1)
+                    )
+            dehazed = current
 
-                # Estimate atmospheric light via DCP
-                dark_channel = get_dark_channel(
-                    img_tensor,
-                    window_size=physics_cfg.get("dark_channel_window", 15)
+            # Optional post-processing for out-of-distribution images
+            if enhance:
+                # Convert tensor to numpy for post-processing
+                img_np = dehazed.squeeze(0).detach().cpu().numpy()
+                img_np = np.transpose(img_np, (1, 2, 0))  # CHW → HWC
+                img_np = np.clip(img_np, 0.0, 1.0)
+                img_np = post_process(
+                    img_np,
+                    enable_clahe=True, clip_limit=2.5, grid_size=8,
+                    enable_gamma=True, gamma=0.85,
                 )
-                atm_light = estimate_atmospheric_light(
-                    img_tensor, dark_channel,
-                    top_percent=physics_cfg.get("atm_light_top_percent", 0.001)
-                )
-
-                # Reconstruct image via Koschmieder's law
-                dehazed = recover_image(
-                    img_tensor, t_pred, atm_light,
-                    t0=physics_cfg.get("t_min", 0.1)
-                )
+                # Convert back to tensor for save_image
+                dehazed = torch.from_numpy(
+                    np.transpose(img_np, (2, 0, 1))  # HWC → CHW
+                ).unsqueeze(0)
 
             # Save result
             save_image(output_path, dehazed)
@@ -161,7 +183,15 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         'config', type=str,
-        help='Path to TOML configuration file (e.g., options/infer_dehazenet.toml)'
+        help='Path to TOML configuration file'
+    )
+    parser.add_argument(
+        '--passes', type=int, default=None,
+        help='Number of iterative dehazing passes (overrides config)'
+    )
+    parser.add_argument(
+        '--enhance', action='store_true',
+        help='Apply post-processing (CLAHE + gamma) for real-world haze'
     )
     args = parser.parse_args()
-    infer(args.config)
+    infer(args.config, passes_override=args.passes, enhance=args.enhance)

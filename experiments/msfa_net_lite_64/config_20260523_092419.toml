@@ -1,31 +1,29 @@
 # ── Experiment ───────────────────────────────────────────────────────────────
-name = "dehazenet_direct_reside_its"
+name = "msfa_net_lite_64"
 
 # ── Dataset ─────────────────────────────────────────────────────────────────
 [datasets.train]
-hazy_dir = 'E:\Documents\Computer Vision Learning\Dataset\hazy'
-clear_dir = 'E:\Documents\Computer Vision Learning\Dataset\clear'
+hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\clear'
 pairing_strategy = "reside"
 patch_size = 128
-batch_size = 8
+batch_size = 16
 num_workers = 4
 augmentation = ["hflip", "vflip"]
+domain_balanced_sampling = true
 
 [datasets.val]
-hazy_dir = 'E:\Documents\Computer Vision Learning\Image Dehazing Traditional\validation\hazy'
-clear_dir = 'E:\Documents\Computer Vision Learning\Image Dehazing Traditional\validation\clear'
+hazy_dir = 'F:\Projects\AI Computer Vision\Validation\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Validation\clear'
 pairing_strategy = "reside"
 patch_size = 256
 
 # ── Model ────────────────────────────────────────────────────────────────────
 [network]
-type = "dehazenet_direct"
-# Direct prediction models skip the DCP + Koschmieder physics pipeline.
-# The model outputs a clean RGB image directly.
+type = "msfa_net_lite"
+channels = 64
 
 # ── Physical Model ───────────────────────────────────────────────────────────
-# Not used during inference for direct models, but kept for reference
-# and for the training script's physics-based validation if enabled.
 [physics]
 dark_channel_window = 15
 atm_light_top_percent = 0.01
@@ -33,15 +31,16 @@ t_min = 0.2
 
 # ── Training ─────────────────────────────────────────────────────────────────
 [train]
-epochs = 100
+epochs = 300
 loss_type = "mixed"
 grad_clip = true
 grad_clip_value = 1.0
 
 [train.mixed_loss_weights]
-l1 = 1.0            # L1 produces sharper results than MSE
-ssim = 0.1           # Structural similarity for perceptual quality
-perceptual = 0.1     # VGG perceptual loss for natural-looking output
+l1 = 1.0
+ssim = 0.5
+perceptual = 0.1
+color = 0.3
 
 [train.optimizer]
 type = "adam"
@@ -51,7 +50,7 @@ betas = [0.9, 0.999]
 
 [train.scheduler]
 type = "cosine"
-T_max = 100
+T_max = 300
 eta_min = 1e-7
 
 # ── Validation ───────────────────────────────────────────────────────────────
@@ -62,5 +61,5 @@ metrics = ["psnr", "ssim"]
 # ── Logging ──────────────────────────────────────────────────────────────────
 [logger]
 print_freq = 50
-save_checkpoint_freq = 5
+save_checkpoint_freq = 1
 save_dir = "./experiments"

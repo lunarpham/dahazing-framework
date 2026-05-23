@@ -1,0 +1,69 @@
+# ── Experiment ───────────────────────────────────────────────────────────────
+name = "unetdcp_training"
+
+# ── Dataset ─────────────────────────────────────────────────────────────────
+[datasets.train]
+hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\clear'
+pairing_strategy = "reside"
+patch_size = 256
+batch_size = 12
+num_workers = 4
+augmentation = ["hflip", "vflip"]
+domain_balanced_sampling = true
+
+[datasets.val]
+hazy_dir = 'F:\Projects\AI Computer Vision\Validation\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Validation\clear'
+pairing_strategy = "reside"
+patch_size = 256
+
+# ── Model ────────────────────────────────────────────────────────────────────
+[network]
+type = "unetdcp"
+patch_size = 7
+gif_radius = 8
+gif_eps = 1e-2
+t_min_sky = 0.4
+t_min_global = 0.3
+
+# ── Physical Model ───────────────────────────────────────────────────────────
+# Handled internally by UNetDCP — these are for fallback/reference only.
+[physics]
+dark_channel_window = 7
+atm_light_top_percent = 0.01
+t_min = 0.1
+
+# ── Training ─────────────────────────────────────────────────────────────────
+[train]
+epochs = 300
+loss_type = "mixed"
+grad_clip = true
+grad_clip_value = 1.0
+
+[train.mixed_loss_weights]
+l1 = 1.0
+ssim = 0.5
+color = 0.3
+
+[train.optimizer]
+type = "adamw"
+lr = 1e-4
+weight_decay = 1e-4          # U-Net is large, use weight decay for regularization
+betas = [0.9, 0.999]
+
+[train.scheduler]
+type = "cosine"
+T_max = 100
+eta_min = 1e-6
+
+# ── Validation ───────────────────────────────────────────────────────────────
+[val]
+val_freq = 1
+metrics = ["psnr", "ssim"]
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+[logger]
+print_freq = 50
+save_checkpoint_freq = 1
+save_dir = "./experiments"

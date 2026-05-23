@@ -287,6 +287,8 @@ class MixedLoss(nn.Module):
             self.losses["laplacian"] = LaplacianPyramidLoss()
         if "color" in weights:
             self.losses["color"] = ColorConsistencyLoss()
+        if "tv" in weights:
+            self.losses["tv"] = TVLoss()
 
     def forward(self, pred, target):
         total = 0.0
@@ -332,3 +334,15 @@ def build_loss(config: dict) -> nn.Module:
             f"Unknown loss type: '{loss_type}'. "
             f"Supported: 'mse', 'l1', 'ssim', 'perceptual', 'sobel', 'laplacian', 'color', 'mixed'"
         )
+
+class TVLoss(nn.Module):
+    """
+    Total Variation Loss — enforces local spatial smoothness.
+    Highly effective at removing 'burned' or noisy artifacts in homogenous 
+    regions like roads and sky by penalizing rapid pixel-to-pixel changes.
+    """
+    def forward(self, pred, target=None):
+        # target is ignored, standard API signature for MixedLoss
+        h_tv = torch.mean(torch.abs(pred[:, :, 1:, :] - pred[:, :, :-1, :]))
+        w_tv = torch.mean(torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1]))
+        return h_tv + w_tv

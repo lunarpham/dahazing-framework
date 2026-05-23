@@ -89,7 +89,7 @@ def build_scheduler(optimizer: optim.Optimizer, config: dict):
 
 @torch.no_grad()
 def validate(model, val_loader, device, physics_config, metrics_list,
-             is_direct=False, save_dir=None, epoch=None, max_save=5):
+             is_direct=False, save_dir=None, epoch=None, max_save=0):
     """
     Run validation, return average metrics, and optionally save sample images.
     
@@ -97,7 +97,7 @@ def validate(model, val_loader, device, physics_config, metrics_list,
         is_direct: If True, model outputs clean image directly (no physics).
         save_dir:  If provided, save side-by-side comparison images here.
         epoch:     Current epoch number (used in saved filenames).
-        max_save:  Maximum number of sample images to save per validation.
+        max_save:  Max images to save. 0 = save all.
     
     Returns:
         dict of {metric_name: average_value}
@@ -107,19 +107,14 @@ def validate(model, val_loader, device, physics_config, metrics_list,
     count = 0
     saved_count = 0
 
-    # Create epoch-specific subfolder for saved images
-    epoch_save_dir = None
-    if save_dir is not None and epoch is not None:
-        epoch_save_dir = os.path.join(save_dir, f"epoch_{epoch:03d}")
-        os.makedirs(epoch_save_dir, exist_ok=True)
-
     for batch in val_loader:
         hazy = batch['hazy'].to(device)
         clear = batch['clear'].to(device)
 
         if is_direct:
             # Direct model: output IS the clean image
-            J_pred = model(hazy)
+            output = model(hazy)
+            J_pred = output[0] if isinstance(output, tuple) else output
         else:
             # Transmission-based model: predict t(x), then physics recovery
             t_pred = model(hazy)
@@ -147,20 +142,32 @@ def validate(model, val_loader, device, physics_config, metrics_list,
                 totals["ssim"] += calculate_ssim(pred_i, clear_i).item()
 
             # Save side-by-side comparison: hazy | dehazed | ground truth
-            if epoch_save_dir is not None and saved_count < max_save:
+            # Structure: results/<image_name>/<image_name>_epoch_001.png
+            if save_dir is not None and epoch is not None and (max_save == 0 or saved_count < max_save):
                 comparison = torch.cat([
                     hazy[i:i+1], J_pred[i:i+1], clear[i:i+1]
                 ], dim=3)  # concatenate width-wise
-                save_path = os.path.join(
-                    epoch_save_dir, f"val_{saved_count:03d}.png"
-                )
-                save_image(save_path, comparison)
+
+                # Get image name from path
+                hazy_path = batch.get('hazy_path', [None])
+                if isinstance(hazy_path, (list, tuple)) and i < len(hazy_path) and hazy_path[i]:
+                    base_name = os.path.splitext(os.path.basename(hazy_path[i]))[0]
+                else:
+                    base_name = f"val_{saved_count:03d}"
+
+                # Create per-image subfolder
+                img_dir = os.path.join(save_dir, base_name)
+                os.makedirs(img_dir, exist_ok=True)
+
+                # Save with epoch suffix
+                fname = f"{base_name}_epoch_{epoch:03d}.png"
+                save_image(os.path.join(img_dir, fname), comparison)
                 saved_count += 1
 
         count += batch_size
 
-    if epoch_save_dir is not None and saved_count > 0:
-        print(f"  Saved {saved_count} validation images to: {epoch_save_dir}")
+    if save_dir is not None and saved_count > 0:
+        print(f"  Saved {saved_count} validation images to: {save_dir}")
 
     model.train()
 
@@ -321,7 +328,8 @@ def train(config_path: str):
 
             if is_direct:
                 # Direct model: output IS the clean image prediction
-                J_pred = model(hazy)
+                output = model(hazy)
+                J_pred = output[0] if isinstance(output, tuple) else output
             else:
                 # Transmission-based model: predict t(x), then physics
                 t_pred = model(hazy)
@@ -343,6 +351,13 @@ def train(config_path: str):
 
             # Loss against ground truth clean image
             loss = criterion(J_pred, clear)
+
+            # Auxiliary supervision for DCPNet edge/sky branches
+            if hasattr(model, 'compute_aux_loss'):
+                aux_weight = train_cfg.get("aux_loss_weight", 0.1)
+                aux_loss = model.compute_aux_loss(clear)
+                loss = loss + aux_weight * aux_loss
+
             loss.backward()
 
             # Optional gradient clipping
@@ -379,6 +394,7 @@ def train(config_path: str):
                 is_direct=is_direct,
                 save_dir=config["_paths"]["results"],
                 epoch=epoch + 1,
+                max_save=val_cfg.get("save_images", 0),  # 0 = save all
             )
             metrics_str = "  ".join(
                 f"{k.upper()}: {v:.4f}" for k, v in val_metrics.items()

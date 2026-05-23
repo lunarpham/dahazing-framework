@@ -1,32 +1,34 @@
 # ── Experiment ───────────────────────────────────────────────────────────────
-name = "aodnet_pa_reside_its"
+name = "aodnet_capa_v3_multidomain"
 
 # ── Dataset ─────────────────────────────────────────────────────────────────
 [datasets.train]
-hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\Merged Pack\hazy'
-clear_dir = 'F:\Projects\AI Computer Vision\Dataset\Merged Pack\clear'
+hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\clear'
 pairing_strategy = "reside"
-patch_size = 256
-batch_size = 10
+patch_size = 128
+batch_size = 15
 num_workers = 4
 augmentation = ["hflip", "vflip"]
+domain_balanced_sampling = true  # ensure minority domains get fair training
 
 [datasets.val]
-hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\Validation\hazy'
-clear_dir = 'F:\Projects\AI Computer Vision\Dataset\Validation\gt'
+hazy_dir = 'F:\Projects\AI Computer Vision\Validation\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Validation\clear'
 pairing_strategy = "reside"
-patch_size = 256
+patch_size = 128
 
 # ── Model ────────────────────────────────────────────────────────────────────
 [network]
-type = "aodnet_pa"
-# AOD-PA-Net: AOD-Net backbone + Pixel Attention for depth-aware dehazing.
-# The PA block learns a spatial attention map that suppresses halos in clear
-# foreground regions while enabling full correction in dense haze areas.
-# Extremely lightweight (~2.1K params) with spatially-adaptive dehazing.
+type = "aodnet_capa"
+channels = 96             # backbone width — increased for multi-domain capacity
+num_fa_blocks = 3         # stacked FA blocks — progressive attention refinement
+refine_channels = 32      # color refinement tail hidden width
+# AOD-CA-PA-Net v3: reflection padding + stacked FA + color refinement tail.
+# Designed for multi-domain training (RESIDE + O-Haze + NH-Haze + 3R).
 
 # ── Physical Model ───────────────────────────────────────────────────────────
-# Not used directly (AOD-PA-Net uses K(x) formulation), kept for reference.
+# Not used directly (AOD-CA-PA-Net uses K(x) formulation), kept for reference.
 [physics]
 dark_channel_window = 15
 atm_light_top_percent = 0.01
@@ -40,10 +42,19 @@ grad_clip = true
 grad_clip_value = 1.0
 
 [train.mixed_loss_weights]
-l1 = 1.0             # Sharp pixel-level reconstruction
-ssim = 0.1            # Structural similarity
-perceptual = 0.1      # VGG perceptual quality
-dcp = 0.01            # Dark Channel Prior physics regularizer
+# Core pixel fidelity
+l1 = 1.0
+# Structural similarity — strongest perceptual quality driver
+ssim = 0.8
+# Edge-preserving: reduced since no halos observed, free up gradient budget
+sobel = 0.2
+laplacian = 0.1
+# Physics regularizer: penalizes residual haze in dark channels
+dcp = 0.01
+# VGG feature-level similarity — boosted for vivid, natural appearance
+perceptual = 0.3
+# Per-channel color consistency — boosted to fight desaturation
+color = 0.5
 
 [train.optimizer]
 type = "adam"
@@ -53,7 +64,7 @@ betas = [0.9, 0.999]
 
 [train.scheduler]
 type = "cosine"
-T_max = 100
+T_max = 300    # match total epochs — single smooth cosine decay, no restarts
 eta_min = 1e-7
 
 # ── Validation ───────────────────────────────────────────────────────────────

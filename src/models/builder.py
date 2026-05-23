@@ -1,34 +1,30 @@
 """
 Model builder / registry for DehazeNet.
-Add new architectures here as the project grows.
+Supports: DehazeNet, AOD-Net, MSFA-Net, MSFA-Net Lite.
 """
 
 import torch.nn as nn
 from .dehazenet import DehazeNet
-from .dehazenet_plus import DehazeNetPlus
-from .dehazenet_direct import DehazeNetDirect
-from .dehazenet_hybrid import DehazeNetHybrid
 from .aodnet import AODNet
-from .aodnet_enhanced import AODNetEnhanced
-from .aodnet_pa import AODPANet
-from .aodnet_capa import AODCAPANet
+from .msfa_net import MSFANet
+from .msfa_net_lite import MSFANetLite
+from .dcpnet import DCPNet
+from .unetdcp import UNetDCP
 
 
 # ── Model Registry ───────────────────────────────────────────────────────────
 
 MODEL_REGISTRY = {
     "dehazenet": DehazeNet,
-    "dehazenet_plus": DehazeNetPlus,
-    "dehazenet_direct": DehazeNetDirect,
-    "dehazenet_hybrid": DehazeNetHybrid,
     "aodnet": AODNet,
-    "aodnet_enhanced": AODNetEnhanced,
-    "aodnet_pa": AODPANet,
-    "aodnet_capa": AODCAPANet,
+    "msfa_net": MSFANet,
+    "msfa_net_lite": MSFANetLite,
+    "dcpnet": DCPNet,
+    "unetdcp": UNetDCP,
 }
 
 # Models that predict clean images directly (no transmission map → physics)
-DIRECT_MODELS = {"dehazenet_direct", "dehazenet_hybrid", "aodnet", "aodnet_enhanced", "aodnet_pa", "aodnet_capa"}
+DIRECT_MODELS = {"aodnet", "msfa_net", "msfa_net_lite", "dcpnet", "unetdcp"}
 
 
 def build_model(config: dict) -> nn.Module:
@@ -53,7 +49,7 @@ def build_model(config: dict) -> nn.Module:
     model_class = MODEL_REGISTRY[model_type]
 
     # Forward architecture-specific kwargs from [network] config
-    # (e.g., channels = 64 for AOD-CA-PA-Net)
+    # (e.g., channels = 64 for MSFA-Net)
     model_kwargs = {k: v for k, v in network_config.items() if k != "type"}
     try:
         return model_class(**model_kwargs)

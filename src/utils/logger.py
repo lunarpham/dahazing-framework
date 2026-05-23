@@ -24,7 +24,7 @@ class TrainingLogger:
 
     Usage:
         logger = TrainingLogger(log_dir="./experiments/my_exp/logs",
-                                exp_name="aodnet_pa_reside_its")
+                                exp_name="msfa_net_multidomain")
         # In training loop:
         logger.log_epoch(epoch=1, train_loss=0.05, lr=1e-4,
                          val_metrics={"psnr": 22.5, "ssim": 0.85})
