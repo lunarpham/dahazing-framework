@@ -179,7 +179,7 @@ def validate(model, val_loader, device, physics_config, metrics_list,
 
 # ── Training Pipeline ────────────────────────────────────────────────────────
 
-def train(config_path: str):
+def train(config_path: str, resume_arg: str = None):
     """Main training pipeline driven by TOML config."""
 
     # ── Parse Config ─────────────────────────────────────────────────────────
@@ -293,18 +293,32 @@ def train(config_path: str):
     # ── Resume ───────────────────────────────────────────────────────────────
     start_epoch = 0
     best_psnr = 0.0
-    resume_path = path_cfg.get("resume_state")
+    resume_path = resume_arg if resume_arg else path_cfg.get("resume_state")
 
     if resume_path and os.path.exists(resume_path):
         print(f"Resuming from: {resume_path}")
         state = load_training_state(resume_path)
-        model.load_state_dict(state["model_state_dict"])
-        optimizer.load_state_dict(state["optimizer_state_dict"])
-        if scheduler and "scheduler_state_dict" in state:
-            scheduler.load_state_dict(state["scheduler_state_dict"])
-        start_epoch = state.get("epoch", 0)
-        best_psnr = state.get("best_metric", 0.0)
-        print(f"Resumed at epoch {start_epoch}, best PSNR: {best_psnr:.2f}")
+        
+        if "model_state_dict" in state:
+            # Full training state
+            model.load_state_dict(state["model_state_dict"])
+            optimizer.load_state_dict(state["optimizer_state_dict"])
+            if scheduler and "scheduler_state_dict" in state:
+                scheduler.load_state_dict(state["scheduler_state_dict"])
+            start_epoch = state.get("epoch", 0)
+            best_psnr = state.get("best_metric", 0.0)
+            print(f"Resumed full state at epoch {start_epoch}, best PSNR: {best_psnr:.2f}")
+        else:
+            # Just model weights
+            model.load_state_dict(state)
+            
+            import re
+            match = re.search(r'epoch_(\d+)', os.path.basename(resume_path))
+            if match:
+                start_epoch = int(match.group(1))
+                print(f"Loaded model weights from {os.path.basename(resume_path)}. Starting scheduler/logs at epoch {start_epoch}.")
+            else:
+                print(f"Loaded model weights. (Optimizer state not present, starting at epoch 0)")
 
     # ── Training Loop ────────────────────────────────────────────────────────
     epochs = train_cfg["epochs"]
@@ -350,7 +364,10 @@ def train(config_path: str):
                 )
 
             # Loss against ground truth clean image
-            loss = criterion(J_pred, clear)
+            if hasattr(criterion, 'losses') and 'contrastive' in criterion.losses:
+                loss = criterion(J_pred, clear, hazy=hazy)
+            else:
+                loss = criterion(J_pred, clear)
 
             # Auxiliary supervision for DCPNet edge/sky branches
             if hasattr(model, 'compute_aux_loss'):
@@ -472,5 +489,9 @@ if __name__ == '__main__':
         'config', type=str,
         help='Path to TOML configuration file (e.g., options/train_dehazenet.toml)'
     )
+    parser.add_argument(
+        '--resume', type=str, default=None,
+        help='Path to a checkpoint (.pth) to resume training from'
+    )
     args = parser.parse_args()
-    train(args.config)
+    train(args.config, args.resume)

@@ -99,7 +99,6 @@ class PixelAttention(nn.Module):
     def forward(self, x):
         return x * self.pa(x)
 
-
 # ── Feature Attention ────────────────────────────────────────────────────────
 
 class FeatureAttention(nn.Module):

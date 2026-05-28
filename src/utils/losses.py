@@ -248,6 +248,35 @@ class LaplacianPyramidLoss(nn.Module):
             t = self._blur_downsample(t)
         return total / self.num_levels
 
+class ContrastiveLoss(nn.Module):
+    """
+    Supervised Contrastive Loss (AECR-Net style).
+    Pulls the output image closer to the clear target and pushes it away from the hazy input.
+    Requires modifying train.py to pass: loss(pred, target, hazy_input)
+    """
+    def __init__(self):
+        super().__init__()
+        import torchvision.models as models
+        vgg = models.vgg19(weights='DEFAULT').features
+        self.slices = nn.ModuleList([vgg[:4], vgg[4:9], vgg[9:18]]) # relu1_2, relu2_2, relu3_4
+        for param in self.parameters():
+            param.requires_grad = False
+        self.l1 = nn.L1Loss()
+        self.weights = [1.0/8, 1.0/4, 1.0/2]
+
+    def forward(self, pred, clear, hazy):
+        loss = 0
+        x_pred, x_clear, x_hazy = pred, clear, hazy
+        for i, slice_layer in enumerate(self.slices):
+            x_pred = slice_layer(x_pred)
+            x_clear = slice_layer(x_clear)
+            x_hazy = slice_layer(x_hazy)
+            
+            d_pos = self.l1(x_pred, x_clear)
+            d_neg = self.l1(x_pred, x_hazy)
+            loss += self.weights[i] * (d_pos / (d_neg + 1e-7))
+        return loss
+
 
 class MixedLoss(nn.Module):
     """
@@ -289,11 +318,18 @@ class MixedLoss(nn.Module):
             self.losses["color"] = ColorConsistencyLoss()
         if "tv" in weights:
             self.losses["tv"] = TVLoss()
+        if "contrastive" in weights:
+            self.losses["contrastive"] = ContrastiveLoss()
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, hazy=None):
         total = 0.0
         for name, loss_fn in self.losses.items():
-            total = total + self.weights[name] * loss_fn(pred, target)
+            if name == "contrastive":
+                total = total + self.weights[name] * loss_fn(pred, target, hazy)
+            elif name == "exposure":
+                total = total + self.weights[name] * loss_fn(pred) 
+            else:
+                total = total + self.weights[name] * loss_fn(pred, target)
         return total
 
 
@@ -326,6 +362,8 @@ def build_loss(config: dict) -> nn.Module:
         return LaplacianPyramidLoss()
     elif loss_type == "color":
         return ColorConsistencyLoss()
+    elif loss_type == "contrastive":
+        return ContrastiveLoss()
     elif loss_type == "mixed":
         weights = train_config.get("mixed_loss_weights", {"mse": 1.0})
         return MixedLoss(weights)

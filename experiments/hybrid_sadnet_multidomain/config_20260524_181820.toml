@@ -1,0 +1,70 @@
+# ── Experiment ───────────────────────────────────────────────────────────────
+name = "hybrid_sadnet_multidomain"
+
+# ── Dataset ─────────────────────────────────────────────────────────────────
+[datasets.train]
+hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\clear'
+pairing_strategy = "reside"
+patch_size = 128
+batch_size = 24                    # 0.55M params, batch 8-16 is safe
+num_workers = 4
+augmentation = ["hflip", "vflip"]
+domain_balanced_sampling = true
+
+[datasets.val]
+hazy_dir = 'F:\Projects\AI Computer Vision\Validation\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Validation\clear'
+pairing_strategy = "reside"
+patch_size = 256
+
+# ── Model ────────────────────────────────────────────────────────────────────
+[network]
+type = "hybrid_sadnet"
+dim = 96
+num_heads = 8
+num_vit_blocks = 6
+
+# ── Physical Model ───────────────────────────────────────────────────────────
+# Not used directly by HybridHazeNet, but kept for fallback/reference.
+[physics]
+dark_channel_window = 15
+atm_light_top_percent = 0.01
+t_min = 0.1
+
+# ── Training ─────────────────────────────────────────────────────────────────
+[train]
+epochs = 300
+loss_type = "mixed"
+grad_clip = true
+grad_clip_value = 0.5
+
+[train.mixed_loss_weights]
+charbonnier = 1.0    # Replaces 'l1' for sharper, stabler detail convergence
+ssim = 0.5           # Maintains structural grouping and perceptual cohesion
+ffl = 0.5            # Focal Frequency Loss resolves missing micro-textures
+exposure = 0.2       # Clamps headlights/glare from mathematically blowing out
+color = 0.5          # Keeps color stable
+highlight = 0.2      # CRITICAL FIX: Penalizes bright artifacts above 1.0   
+
+[train.optimizer]
+type = "adamw"
+lr = 2e-4  
+weight_decay = 1e-4
+betas = [0.9, 0.999]
+
+[train.scheduler]
+type = "cosine"
+T_max = 300
+eta_min = 1e-6
+
+# ── Validation ───────────────────────────────────────────────────────────────
+[val]
+val_freq = 1
+metrics = ["psnr", "ssim"]
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+[logger]
+print_freq = 50
+save_checkpoint_freq = 1
+save_dir = "./experiments"
