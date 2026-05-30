@@ -1,11 +1,6 @@
 """
-DehazeNet Inference Script
-Usage: python scripts/infer.py options/infer_dehazenet.toml
-
-Output:
-    Results are saved to  experiments/<name>/results/
-    with filename pattern  <stem>_<checkpoint_name><ext>
-    e.g.  canyon_best.png  /  canyon_epoch_50.png  /  canyon_final.png
+MSFA-DeNet v2 Inference Script
+Usage: python scripts/infer.py <config.toml>
 """
 
 import os
@@ -16,14 +11,11 @@ from pathlib import Path
 
 import torch
 
-# Ensure project root is on path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.models import build_model, DIRECT_MODELS
-from src.core import get_dark_channel, estimate_atmospheric_light, recover_image
-from src.utils import load_image, to_tensor, save_image, parse_config, post_process
-import numpy as np
+from src.models import build_model
+from src.utils import load_image, to_tensor, save_image, parse_config
 
 
 def find_images(path: str) -> list:
@@ -41,33 +33,23 @@ def find_images(path: str) -> list:
         raise FileNotFoundError(f"Input path not found: {path}")
 
 
-def infer(config_path: str, passes_override: int = None, enhance: bool = False):
-    """Main inference pipeline driven by TOML config."""
+def infer(config_path: str, passes_override: int = None):
+    """Run inference on images using a trained model."""
 
-    # ── Parse Config ─────────────────────────────────────────────────────────
     config = parse_config(config_path)
-    physics_cfg = config.get("physics", {})
     path_cfg = config.get("path", {})
 
-    # ── Device ───────────────────────────────────────────────────────────────
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     exp_name = config.get('name', 'inference')
-    model_type = config.get('network', {}).get('type', 'dehazenet').lower()
 
-    # ── Inference settings ────────────────────────────────────────────────────
     infer_cfg = config.get("infer", {})
-    num_passes = infer_cfg.get("passes", 1)
-    if passes_override is not None:
-        num_passes = passes_override
+    num_passes = passes_override if passes_override is not None else infer_cfg.get("passes", 1)
 
     print(f"\n{'='*60}")
-    print(f"  DehazeNet Inference")
+    print(f"  MSFA-DeNet v2 Inference")
     print(f"  Experiment:  {exp_name}")
-    print(f"  Model:       {model_type}")
     print(f"  Device:      {device}")
     print(f"  Passes:      {num_passes}{'  (iterative)' if num_passes > 1 else ''}")
-    print(f"  Enhance:     {'ON (CLAHE + gamma)' if enhance else 'OFF'}")
-    print(f"  Config:      {config.get('_config_path', config_path)}")
     print(f"{'='*60}\n")
 
     # ── Model ────────────────────────────────────────────────────────────────
@@ -84,25 +66,10 @@ def infer(config_path: str, passes_override: int = None, enhance: bool = False):
 
     model.eval()
 
-    # Derive suffix from the checkpoint filename stem:
-    #   checkpoints/best.pth      → _best
-    #   checkpoints/epoch_50.pth  → _epoch_50
-    #   checkpoints/final.pth     → _final
-    # Falls back to model type name if no checkpoint path is given.
-    if model_path:
-        ckpt_suffix = Path(model_path).stem          # e.g. "best", "epoch_50"
-    else:
-        ckpt_suffix = model_type                     # fallback: "msfa_net"
-
-    is_direct = model_type in DIRECT_MODELS
-    print(f"Mode:       {'direct prediction' if is_direct else 'transmission → physics'}")
-    print(f"Checkpoint: {ckpt_suffix}")
+    ckpt_suffix = Path(model_path).stem if model_path else "msfa_denet_v2"
 
     # ── Input / Output ───────────────────────────────────────────────────────
     input_path = path_cfg.get("input", "test_images/")
-
-    # If 'output' is not specified, route to experiments/<name>/results/
-    # so results land alongside the model checkpoints and training logs.
     default_output = os.path.join("experiments", exp_name, "results")
     output_dir = path_cfg.get("output", default_output)
     os.makedirs(output_dir, exist_ok=True)
@@ -114,84 +81,34 @@ def infer(config_path: str, passes_override: int = None, enhance: bool = False):
 
     print(f"Input:  {input_path}")
     print(f"Output: {output_dir}")
-    print(f"Suffix: _{ckpt_suffix}")
     print(f"Found {len(images)} image(s) to process.\n")
 
-    # ── Process Each Image ───────────────────────────────────────────────────
+    # ── Process ──────────────────────────────────────────────────────────────
     with torch.no_grad():
         for idx, img_path in enumerate(images):
             filename = os.path.basename(img_path)
             name, ext = os.path.splitext(filename)
-            # e.g. canyon_best.png / canyon_epoch_50.png
             output_path = os.path.join(output_dir, f"{name}_{ckpt_suffix}{ext}")
 
-            # Load image
             img_np = load_image(img_path)
-            img_tensor = to_tensor(img_np).to(device)
+            current = to_tensor(img_np).to(device)
 
-            # Forward pass (multi-pass for dense haze)
-            current = img_tensor
-            for pass_idx in range(num_passes):
-                if is_direct:
-                    current = model(current)
-                else:
-                    t_pred = model(current)
-                    dark_channel = get_dark_channel(
-                        current,
-                        window_size=physics_cfg.get("dark_channel_window", 15)
-                    )
-                    atm_light = estimate_atmospheric_light(
-                        current, dark_channel,
-                        top_percent=physics_cfg.get("atm_light_top_percent", 0.001)
-                    )
-                    current = recover_image(
-                        current, t_pred, atm_light,
-                        t0=physics_cfg.get("t_min", 0.1)
-                    )
-            dehazed = current
+            for _ in range(num_passes):
+                current = model(current)
 
-            # Optional post-processing for out-of-distribution images
-            if enhance:
-                # Convert tensor to numpy for post-processing
-                img_np = dehazed.squeeze(0).detach().cpu().numpy()
-                img_np = np.transpose(img_np, (1, 2, 0))  # CHW → HWC
-                img_np = np.clip(img_np, 0.0, 1.0)
-                img_np = post_process(
-                    img_np,
-                    enable_clahe=True, clip_limit=2.5, grid_size=8,
-                    enable_gamma=True, gamma=0.85,
-                )
-                # Convert back to tensor for save_image
-                dehazed = torch.from_numpy(
-                    np.transpose(img_np, (2, 0, 1))  # HWC → CHW
-                ).unsqueeze(0)
-
-            # Save result
-            save_image(output_path, dehazed)
-            print(f"  [{idx+1}/{len(images)}] {filename}  →  {output_path}")
+            save_image(output_path, current)
+            print(f"  [{idx+1}/{len(images)}] {filename} → {output_path}")
 
     print(f"\nDone! {len(images)} image(s) saved to: {output_dir}")
-    print(f"      Filename pattern: <stem>_{ckpt_suffix}<ext>")
 
-
-# ── Entry Point ──────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='Run DehazeNet inference with TOML configuration',
+        description='Run MSFA-DeNet v2 inference',
         usage='python scripts/infer.py <config.toml>'
     )
-    parser.add_argument(
-        'config', type=str,
-        help='Path to TOML configuration file'
-    )
-    parser.add_argument(
-        '--passes', type=int, default=None,
-        help='Number of iterative dehazing passes (overrides config)'
-    )
-    parser.add_argument(
-        '--enhance', action='store_true',
-        help='Apply post-processing (CLAHE + gamma) for real-world haze'
-    )
+    parser.add_argument('config', type=str, help='Path to TOML config file')
+    parser.add_argument('--passes', type=int, default=None,
+                        help='Number of iterative dehazing passes (overrides config)')
     args = parser.parse_args()
-    infer(args.config, passes_override=args.passes, enhance=args.enhance)
+    infer(args.config, passes_override=args.passes)

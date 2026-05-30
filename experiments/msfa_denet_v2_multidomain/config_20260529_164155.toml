@@ -1,5 +1,5 @@
 # ── Experiment ───────────────────────────────────────────────────────────────
-name = "msfa_net_lite_128"
+name = "msfa_denet_v2_multidomain"
 
 # ── Dataset ─────────────────────────────────────────────────────────────────
 [datasets.train]
@@ -7,7 +7,7 @@ hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\ots\ots_hazy'
 clear_dir = 'F:\Projects\AI Computer Vision\Dataset\ots\ots_clear'
 pairing_strategy = "reside"
 patch_size = 256
-batch_size = 10
+batch_size = 6               # slightly smaller due to 3-scale pyramid
 num_workers = 4
 augmentation = ["hflip", "vflip"]
 domain_balanced_sampling = true
@@ -20,10 +20,15 @@ patch_size = 256
 
 # ── Model ────────────────────────────────────────────────────────────────────
 [network]
-type = "msfa_net_lite"
-channels = 64
+type = "msfa_denet_v2"
+channels = 64              # backbone width
+# MSFADeNetV2: Enhanced Multi-Scale Feature Attention Dehazing Network
+# Improvements: no normalization, depthwise-separable ConvBlock with SE,
+# 3-scale pyramid (full/½/¼), transmission-aware attention,
+# per-channel residual scale, pixel shuffle upsampling.
 
 # ── Physical Model ───────────────────────────────────────────────────────────
+# Not used directly (MSFA-DeNet v2 uses direct residual prediction).
 [physics]
 dark_channel_window = 15
 atm_light_top_percent = 0.01
@@ -38,21 +43,20 @@ grad_clip_value = 1.0
 
 [train.mixed_loss_weights]
 l1 = 1.0
-ssim = 0.5
-perceptual = 0.1
-color = 0.3
-contrastive = 0.2
+ssim = 0.4
+perceptual = 0.2
+fft = 0.1
 
 [train.optimizer]
 type = "adamw"
-lr = 1e-4
-weight_decay = 0.0
+lr = 2e-4
+weight_decay = 1e-4
 betas = [0.9, 0.999]
 
 [train.scheduler]
 type = "cosine"
-T_max = 300
-eta_min = 1e-7
+T_max = 100
+eta_min = 1e-6
 
 # ── Validation ───────────────────────────────────────────────────────────────
 [val]

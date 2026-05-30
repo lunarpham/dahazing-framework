@@ -1,7 +1,4 @@
-"""
-TOML Configuration Parser for DehazeNet.
-Handles loading, validation, and management of experiment configs.
-"""
+"""TOML configuration parser for experiment configs."""
 
 import sys
 import os
@@ -24,30 +21,22 @@ except ModuleNotFoundError:
 # ── Default Configuration ────────────────────────────────────────────────────
 
 DEFAULTS = {
-    "name": "dehazenet_experiment",
+    "name": "msfa_denet_v2_experiment",
 
     "datasets": {
         "train": {
-            "pairing_strategy": "reside",
             "patch_size": 128,
             "batch_size": 8,
             "num_workers": 4,
             "augmentation": ["hflip", "vflip"],
         },
         "val": {
-            "pairing_strategy": "reside",
             "patch_size": 256,
         },
     },
 
     "network": {
-        "type": "dehazenet",
-    },
-
-    "physics": {
-        "dark_channel_window": 15,
-        "atm_light_top_percent": 0.001,
-        "t_min": 0.1,
+        "type": "msfa_denet_v2",
     },
 
     "train": {

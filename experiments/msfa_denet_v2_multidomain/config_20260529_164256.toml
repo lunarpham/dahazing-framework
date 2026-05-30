@@ -1,13 +1,13 @@
 # ── Experiment ───────────────────────────────────────────────────────────────
-name = "msfa_net_multidomain"
+name = "msfa_denet_v2_multidomain"
 
 # ── Dataset ─────────────────────────────────────────────────────────────────
 [datasets.train]
-hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\hazy'
-clear_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\clear'
+hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\ots\ots_hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Dataset\ots\ots_clear'
 pairing_strategy = "reside"
-patch_size = 128
-batch_size = 15               # slightly smaller than AOD due to larger model
+patch_size = 256
+batch_size = 6               # slightly smaller due to 3-scale pyramid
 num_workers = 4
 augmentation = ["hflip", "vflip"]
 domain_balanced_sampling = true
@@ -20,16 +20,15 @@ patch_size = 256
 
 # ── Model ────────────────────────────────────────────────────────────────────
 [network]
-type = "msfa_net"
+type = "msfa_denet_v2"
 channels = 64              # backbone width
-num_fa = 2                 # FA blocks per encoder/decoder level
-num_dense_layers = 3       # conv layers per DenseBlock
-# MSFA-Net: Multi-Scale Feature Attention Network
-# Combines MSBDN encoder-decoder with FFA-Net CA→PA attention.
-# Global residual learning: clean = hazy + residual.
+# MSFADeNetV2: Enhanced Multi-Scale Feature Attention Dehazing Network
+# Improvements: no normalization, depthwise-separable ConvBlock with SE,
+# 3-scale pyramid (full/½/¼), transmission-aware attention,
+# per-channel residual scale, pixel shuffle upsampling.
 
 # ── Physical Model ───────────────────────────────────────────────────────────
-# Not used directly (MSFA-Net uses direct residual prediction).
+# Not used directly (MSFA-DeNet v2 uses direct residual prediction).
 [physics]
 dark_channel_window = 15
 atm_light_top_percent = 0.01
@@ -37,36 +36,27 @@ t_min = 0.2
 
 # ── Training ─────────────────────────────────────────────────────────────────
 [train]
-epochs = 300
+epochs = 100
 loss_type = "mixed"
 grad_clip = true
 grad_clip_value = 1.0
 
 [train.mixed_loss_weights]
-# Core pixel fidelity
 l1 = 1.0
-# Structural similarity — strongest perceptual quality driver
-ssim = 0.8
-# Edge-preserving: light regularization
-sobel = 0.2
-laplacian = 0.1
-# Physics regularizer: penalizes residual haze in dark channels
-dcp = 0.01
-# VGG feature-level similarity — vivid, natural appearance
+ssim = 0.4
 perceptual = 0.3
-# Per-channel color consistency
-color = 0.5
+fft = 0.1
 
 [train.optimizer]
-type = "adam"
-lr = 5e-5
-weight_decay = 0.0
+type = "adamw"
+lr = 2e-4
+weight_decay = 1e-4
 betas = [0.9, 0.999]
 
 [train.scheduler]
 type = "cosine"
-T_max = 300
-eta_min = 1e-7
+T_max = 100
+eta_min = 1e-6
 
 # ── Validation ───────────────────────────────────────────────────────────────
 [val]
@@ -76,5 +66,5 @@ metrics = ["psnr", "ssim"]
 # ── Logging ──────────────────────────────────────────────────────────────────
 [logger]
 print_freq = 50
-save_checkpoint_freq = 5
+save_checkpoint_freq = 1
 save_dir = "./experiments"

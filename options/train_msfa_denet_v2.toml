@@ -1,57 +1,48 @@
-# ── Experiment ───────────────────────────────────────────────────────────────
-name = "msfa_net_lite_64"
+name = "msfa_denet_v2_multidomain"
 
-# ── Dataset ─────────────────────────────────────────────────────────────────
+# ── Dataset ──────────────────────────────────────────────────────────────────
 [datasets.train]
-hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\MergedDataset\dense-hazy'
-clear_dir = 'F:\Projects\AI Computer Vision\Dataset\MergedDataset\dense-clear'
-pairing_strategy = "reside"
-patch_size = 128
-batch_size = 16
+hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\ots\ots_hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Dataset\ots\ots_clear'
+patch_size = 256
+batch_size = 6
 num_workers = 4
 augmentation = ["hflip", "vflip"]
 domain_balanced_sampling = true
 
 [datasets.val]
-hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\NH-Haze\NH-HAZE\val\hazy'
-clear_dir = 'F:\Projects\AI Computer Vision\Dataset\NH-Haze\NH-HAZE\val\clear'
-pairing_strategy = "reside"
+hazy_dir = 'F:\Projects\AI Computer Vision\Validation\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Validation\clear'
 patch_size = 256
 
 # ── Model ────────────────────────────────────────────────────────────────────
 [network]
-type = "msfa_net_lite"
-channels = 96
-
-# ── Physical Model ───────────────────────────────────────────────────────────
-[physics]
-dark_channel_window = 15
-atm_light_top_percent = 0.01
-t_min = 0.2
+type = "msfa_denet_v2"
+channels = 64
 
 # ── Training ─────────────────────────────────────────────────────────────────
 [train]
-epochs = 300
+epochs = 100
 loss_type = "mixed"
 grad_clip = true
 grad_clip_value = 1.0
 
 [train.mixed_loss_weights]
 l1 = 1.0
-ssim = 0.5
-perceptual = 0.1
-color = 0.3
+ssim = 0.4
+perceptual = 0.3
+fft = 0.1
 
 [train.optimizer]
-type = "adam"
-lr = 1e-4
-weight_decay = 0.0
+type = "adamw"
+lr = 2e-4
+weight_decay = 1e-4
 betas = [0.9, 0.999]
 
 [train.scheduler]
 type = "cosine"
-T_max = 300
-eta_min = 1e-7
+T_max = 100
+eta_min = 1e-6
 
 # ── Validation ───────────────────────────────────────────────────────────────
 [val]

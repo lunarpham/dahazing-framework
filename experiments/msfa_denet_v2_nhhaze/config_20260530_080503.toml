@@ -1,34 +1,33 @@
 # ── Experiment ───────────────────────────────────────────────────────────────
-name = "aodnet_capa_v3_multidomain"
+name = "msfa_denet_v2_nhhaze"
 
 # ── Dataset ─────────────────────────────────────────────────────────────────
 [datasets.train]
-hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\hazy'
-clear_dir = 'F:\Projects\AI Computer Vision\Dataset\OutdoorTrainingSet\clear'
+hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\NH-Haze\NH-HAZE\train\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Dataset\NH-Haze\NH-HAZE\train\clear'
 pairing_strategy = "reside"
-patch_size = 128
-batch_size = 15
+patch_size = 256
+batch_size = 4
 num_workers = 4
 augmentation = ["hflip", "vflip"]
-domain_balanced_sampling = true  # ensure minority domains get fair training
+domain_balanced_sampling = true
 
 [datasets.val]
-hazy_dir = 'F:\Projects\AI Computer Vision\Validation\hazy'
-clear_dir = 'F:\Projects\AI Computer Vision\Validation\clear'
+hazy_dir = 'F:\Projects\AI Computer Vision\Dataset\O-Haze\O-HAZY\hazy'
+clear_dir = 'F:\Projects\AI Computer Vision\Dataset\O-Haze\O-HAZY\GT'
 pairing_strategy = "reside"
-patch_size = 128
+patch_size = 256
 
 # ── Model ────────────────────────────────────────────────────────────────────
 [network]
-type = "aodnet_capa"
-channels = 96             # backbone width — increased for multi-domain capacity
-num_fa_blocks = 3         # stacked FA blocks — progressive attention refinement
-refine_channels = 32      # color refinement tail hidden width
-# AOD-CA-PA-Net v3: reflection padding + stacked FA + color refinement tail.
-# Designed for multi-domain training (RESIDE + O-Haze + NH-Haze + 3R).
+type = "msfa_denet_v2"
+channels = 64
+
+[path]
+pretrain = 'F:\Projects\AI Computer Vision\dahazing-framework\experiments\msfa_denet_v2_multidomain\checkpoints\epoch_99.pth'
 
 # ── Physical Model ───────────────────────────────────────────────────────────
-# Not used directly (AOD-CA-PA-Net uses K(x) formulation), kept for reference.
+# Not used directly (MSFA-DeNet v2 uses direct residual prediction).
 [physics]
 dark_channel_window = 15
 atm_light_top_percent = 0.01
@@ -36,40 +35,31 @@ t_min = 0.2
 
 # ── Training ─────────────────────────────────────────────────────────────────
 [train]
-epochs = 300
+epochs = 100
 loss_type = "mixed"
 grad_clip = true
 grad_clip_value = 1.0
 
 [train.mixed_loss_weights]
-# Core pixel fidelity
 l1 = 1.0
-# Structural similarity — strongest perceptual quality driver
-ssim = 0.8
-# Edge-preserving: reduced since no halos observed, free up gradient budget
-sobel = 0.2
-laplacian = 0.1
-# Physics regularizer: penalizes residual haze in dark channels
-dcp = 0.01
-# VGG feature-level similarity — boosted for vivid, natural appearance
+ssim = 0.4
 perceptual = 0.3
-# Per-channel color consistency — boosted to fight desaturation
-color = 0.5
+fft = 0.1
 
 [train.optimizer]
-type = "adam"
-lr = 1e-4
-weight_decay = 0.0
+type = "adamw"
+lr = 1e-5
+weight_decay = 1e-4
 betas = [0.9, 0.999]
 
 [train.scheduler]
 type = "cosine"
-T_max = 300    # match total epochs — single smooth cosine decay, no restarts
-eta_min = 1e-7
+T_max = 100
+eta_min = 1e-8
 
 # ── Validation ───────────────────────────────────────────────────────────────
 [val]
-val_freq = 1
+val_freq = 5
 metrics = ["psnr", "ssim"]
 
 # ── Logging ──────────────────────────────────────────────────────────────────
